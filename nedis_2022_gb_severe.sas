@@ -789,6 +789,45 @@ proc print data=work.perinatal_daegu noobs label;
 label disease_no='번호' disease='질환명' total_n='전체 환자수' out_n='유출 건수'
       daegu_n='대구 소재병원 이용 건수' top6_n='대구 6개 특정병원 이용 건수'
       out_pct='유출율(%, 전체대비)'
-      daegu_pct_of_total='대구 유출율(%, 전체대비)' daegu_pct_of_out='대구 유출율(%, 유출대비)'
-      top6_pct_of_total='대구6병원 유출율(%, 전체대비)' top6_pct_of_out='대구6병원 유출율(%, 유출대비)';
+      daegu_pct_of_total='대구 유출율(%, 전체대비)' daegu_pct_of_out='대구 유출율(%, 유출대비) *확정 지표*'
+      top6_pct_of_total='대구6병원 유출율(%, 전체대비)' top6_pct_of_out='대구6병원 유출율(%, 유출대비) *확정 지표*';
+run;
+
+/* 3) 중증응급환자 전체(28대 질환 통합) - 유출 건수 대비 대구 종합병원급 이상(6개 병원) 유출률
+   [확정] 분모=유출 건수(gb_sido_out=0), 분자=그 중 대구 종합병원급 이상(ttop_dg=1, =6개 병원)
+   전체 + 6개 진료권(pa_hsa_gb)별로 산출 (PDF의 "권역별 중증응급환자 대구광역시 유출 현황"과 동일 구도) */
+proc format;
+value hsafmt
+1='안동권' 2='경주권' 3='포항권' 4='구미권' 5='영주권' 6='상주권';
+run;
+
+data work.severe_daegu_top;
+set save.pa_area end=eof;
+if emergency_dis=1;
+array tot{0:6} _temporary_ (7*0);   *0=전체, 1~6=진료권;
+array outn{0:6} _temporary_ (7*0);
+array topn{0:6} _temporary_ (7*0);
+tot{0}+1;
+if gb_sido_out=0 then outn{0}+1;
+if gb_dg_topgo=1 then topn{0}+1;
+if 1<=pa_hsa_gb<=6 then do;
+  tot{pa_hsa_gb}+1;
+  if gb_sido_out=0 then outn{pa_hsa_gb}+1;
+  if gb_dg_topgo=1 then topn{pa_hsa_gb}+1;
+end;
+if eof then do g=0 to 6;
+  group = ifc(g=0,'전체(경북)',put(g,hsafmt.));
+  total_n=tot{g};
+  out_n=outn{g};
+  top6_n=topn{g};
+  top6_pct_of_out = ifn(out_n>0, round(top6_n/out_n*100,0.1), .);
+  output;
+end;
+keep group total_n out_n top6_n top6_pct_of_out;
+run;
+
+proc print data=work.severe_daegu_top noobs label;
+label group='구분' total_n='전체 중증응급환자수' out_n='유출 건수'
+      top6_n='대구 종합병원급이상(6개병원) 유출 건수'
+      top6_pct_of_out='유출건수 대비 대구 종합병원급이상 유출률(%)';
 run;
