@@ -727,9 +727,10 @@ value dfmt
 24='사지절단' 25='급성신부전' 26='안과적응급' 27='소생술후상태' 28='비뇨기과응급';
 run;
 
-/* 1) 질환별 유출 현황(%) + 전체(중복제외) 유출율
-   - save.pa_area 자체가 이미 "emergency_dis=1인 유니크 환자" 단위이므로,
-     전체(중복제외) 행은 이 데이터셋 전체 건수를 그대로 분모로 사용 */
+/* 1) 질환별 유출 현황(%) + 전체(중증응급환자, 중복제외) 유출율
+   - "전체" 행은 emergency_dis=1(28대 질환 중 하나라도 해당하는 중증응급환자)만 집계.
+     save.pa_area는 이미 emergency_dis=1로만 구성돼 있지만, 다른 데이터셋에 적용해도
+     안전하도록 조건을 명시적으로 검사함 */
 data save.dis_outflow;
 set save.pa_area end=eof;
 array ds{28} emergency_dis_1-emergency_dis_28;
@@ -743,11 +744,13 @@ do i=1 to 28;
     if gb_sido_out=0 then outn{i}+1;
   end;
 end;
-tot_all+1;
-if gb_sido_out=0 then outn_all+1;
+if emergency_dis=1 then do;
+  tot_all+1;
+  if gb_sido_out=0 then outn_all+1;
+end;
 
 if eof then do;
-  disease_no=0; disease='전체(중복제외)';
+  disease_no=0; disease='전체(중증응급환자, 중복제외)';
   total_n=tot_all; out_n=outn_all;
   out_pct=ifn(total_n>0, round(out_n/total_n*100,0.1), .);
   output;
