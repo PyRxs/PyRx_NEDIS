@@ -253,15 +253,30 @@ run;
        퇴실 또는 퇴원 진단코드(구분 1,2) 중 하나라도 해당하면 중증응급
  **********************************************************/
 
-/* &n번 질환, 진단코드 앞 &len자리가 &codes(공백 구분) 중 하나이면 td(퇴실)/cd(퇴원)=1 */
+/* &n번 질환, 진단코드 앞 &len자리가 &codes(공백 구분) 중 하나이면 td(퇴실)/cd(퇴원)=1
+   [수정] findw()로 매칭했더니 코드가 2개 이상인 질환(뇌졸중/뇌실질출혈/대동맥박리 등)이
+   원자료에 해당 코드가 다수 존재함에도(진단 필드 직접 카운트로 확인) 전부 0으로 나오는
+   현상이 있어(findw 인자 조합 문제로 추정, 원인 특정 못함), 2단계 ICISS에서 이미 검증된
+   방식과 동일하게 findw 대신 "codes"를 'I63','I64' 형태 quoted IN-list로 변환해 SAS
+   내장 in() 연산자로 직접 비교하도록 변경함. */
 %macro dis(n=, len=, codes=);
-  %local i k;
+  %local i k j w qcodes;
+  %let qcodes=;
+  %let j=1;
+  %let w=%scan(&codes,&j,%str( ));
+  %do %while(%length(&w));
+    %if &j>1 %then %let qcodes=&qcodes,;
+    %let qcodes=&qcodes.'&w.';
+    %let j=%eval(&j+1);
+    %let w=%scan(&codes,&j,%str( ));
+  %end;
+
   %do i=1 %to 20;
     %let k=%sysfunc(putn(&i,z2.));
     if strip(vvalue(DGOTDGGB&k)) in ('1','2') and not missing(DGOTDIAG&k)
-       and findw("&codes", strip(substr(DGOTDIAG&k,1,&len)), ' ', 't')>0 then emergency_dis_td_&n=1;
+       and substr(DGOTDIAG&k,1,&len) in (&qcodes) then emergency_dis_td_&n=1;
     if strip(vvalue(DGDCDGGB&k)) in ('1','2') and not missing(DGDCDIAG&k)
-       and findw("&codes", strip(substr(DGDCDIAG&k,1,&len)), ' ', 't')>0 then emergency_dis_cd_&n=1;
+       and substr(DGDCDIAG&k,1,&len) in (&qcodes) then emergency_dis_cd_&n=1;
   %end;
 %mend;
 
