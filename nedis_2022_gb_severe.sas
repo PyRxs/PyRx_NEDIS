@@ -1,5 +1,15 @@
 /**********************************************************************
   NEDIS 2022 : 경상북도 + 28대 중증응급 축소 버전 (0~5단계)
+  - 실제 원자료: EMIHPTMI_2022.csv (공식 변수 44개 + dgotdiag/dgdcdiag 01~20 + final_need2/final_prv2)
+  - 2017~2021 파이프라인과의 차이점 (원자료 공식 변수설명서 기준으로 확인/반영):
+      1) PTMIIDNO(랜덤매칭키)가 이 파일에는 없음 -> 0단계에서 행번호로 합성한 PTMIIDNO를
+         생성해서 이후 단계(정렬/병합 키)는 전부 그대로 사용 (매크로/코드 수정 불필요)
+      2) 원본의 save.ptm_dt3(최종치료 필요 질환군, 첨부2) 외부 병합 단계는 제거함.
+         원자료에 이미 final_need2/final_prv2(최종치료 필요/제공 사례, 경북 소재 기관 한정)가
+         제공되지만, 이번 분석 목적(질환별/대구 유출)과는 무관한 별개 지표라 사용하지 않고
+         원본 컬럼 그대로만 통과시킴(필요해지면 별도로 다시 설계할 것)
+      3) PTMIEMCL(응급의료기관종별) 값이 'A'/'C'/'D' 코드가 아니라 '권역응급의료센터' 같은
+         한글 텍스트로 제공됨 -> 4단계 h_type 판정을 index() 부분일치로 변경
   - 흐름
       0단계  원자료 import -> 경북(환자 거주지 기준)만 추출                    -> save.PTM2022_GB
       2단계  중증외상(ICISS/SRR 2020) 산출 (경북 데이터에만 수행)              -> save.otdc_srr
@@ -10,33 +20,119 @@
       1) 질환별 유출 현황     : emergency_dis_1~28 × gb_sigu_out/gb_sido_out/gb_6gr/gb_4gr
       2) 대구 소재 병원 유출  : daegu, daegu_top, ttop_dg, gb_dg_go, gb_dg_topgo
       3) 대구 특정 6개 병원   : gb_hp, gb_hp_yu, gb_hp_ga, gb_hp_ch, gb_hp_gae, gb_hp_pati
-         (경북대·영남대·가톨릭대·칠곡경북대·계명대동산·대구파티마 외 다른 병원은
-          PTMIEMNM 기준으로 별도 변수를 추가해야 함)
+         (PTMIEMNM은 실제 기관명이 아니라 "기관식별코드 대체"(익명 코드)라서, 이 6개 외
+          다른 병원을 보려면 그 병원의 익명 코드값을 먼저 알아내야 함)
 **********************************************************************/
 
 libname save '\\172.30.1.200\경북지원단\경북지원단\공공보건의료 협력체계 구축사업 기초조사 위탁 용역\응급 NEDIS 임시';
 
 /*--------------------------------------------------------------------
   0단계: import 후 경북만 추출
+   - PROC IMPORT(GUESSINGROWS) 대신 INFILE/INPUT을 직접 선언한 1-pass 방식으로 변경.
+     '-'/'1111'류 결측 코드가 들어올 수 있는 날짜·시간·분류 필드는 전부 문자형으로 지정해서
+     GUESSINGROWS 스캔 자체를 없앰(더 빠르고, 타입 오추정으로 인한 invalid data 오류도 없음).
+   - PTMIIDNO가 원자료에 없어서, 행번호를 그대로 PTMIIDNO로 합성해 이후 단계 호환.
    - 환자 거주지(PTMIGUCD)가 47xxx인 건만 남김 (응급의료기관 소재지는 보지 않음
      -> 경북 밖 병원을 이용한 경북 거주자의 대구 유출(gb_dg_go) 등, 응급의료기관
         소재지 기준 분석이 필요해지면 이 조건에 PTMIEMAR 조건을 다시 추가할 것)
-   - GUESSINGROWS=MAX : 450000행 이후에 '-' 등 문자가 나오면 숫자형으로 잘못 추정되어
-     값이 결측 처리될 수 있어서 MAX 로 변경 (느리면 다시 낮추되 변수 타입 확인 필요)
 --------------------------------------------------------------------*/
-PROC IMPORT OUT=work.PTM2022_raw
-DATAFILE="\\172.30.1.200\경북지원단\경북지원단\경상북도 응급의료지원단\NEDIS\JE20241103\JE20241103\2022.csv"
-DBMS=csv REPLACE;
-GETNAMES=YES;
-GUESSINGROWS=MAX;
-RUN;
+data work.PTM2022_raw;
+infile "\\172.30.1.200\경북지원단\경북지원단\경상북도 응급의료지원단\NEDIS\JE20241103\JE20241103\EMIHPTMI_2022.csv"
+delimiter=',' MISSOVER DSD lrecl=32767 firstobs=2;
+informat
+ ptmiemar   best32.
+ ptmiemcl   $16.
+ ptmiemnm   best32.
+ ptmiindt   $8.      /* '-'/'11111111' 대비 문자형 (원본 numeric 추정 시 invalid data 발생) */
+ ptmiintm   $4.      /* '-'/'1111' 대비 문자형 */
+ ptmibrtd   best32.
+ ptmisexx   $1.
+ ptmigucd   $5.
+ ptmiiukd   best32.
+ ptmiakdt   $8.      /* '-' 대비 문자형 (752385행부터 '-' 등장, 이번 오류 원인 컬럼) */
+ ptmiaktm   $4.      /* '-' 대비 문자형 (위와 동일 원인) */
+ ptmidgkd   $1.      /* '-' 대비 문자형 */
+ ptmiarcf   $1.
+ ptmiarcs   $2.
+ ptmiinrt   best32.
+ ptmiinmn   best32.
+ ptmimnsy   $8.
+ ptmimssr   best32.
+ ptmisym2   $8.
+ ptmisys2   best32.
+ ptmisym3   $8.
+ ptmisys3   best32.
+ ptmiemsy   $1.
+ ptmiresp   $1.
+ ptmikts1   $1.      /* '-' 대비 문자형 */
+ ptmiktdt   $8.      /* '-'/'11111111' 대비 문자형 */
+ ptmikttm   $4.      /* '-'/'1111' 대비 문자형 */
+ ptmikjob   $1.
+ ptmikts2   $1.
+ ptmiarea   $1.
+ ptmimdcd   $1.
+ ptmisdcd   $1.
+ ptmiemrt   $2.
+ ptmihsrt   $2.
+ ptmidept   $2.
+ ptmiotdt   $8.      /* '-'/'11111111' 대비 문자형 */
+ ptmiottm   $4.      /* '-'/'1111' 대비 문자형 */
+ ptmihsdt   $8.
+ ptmihstm   $4.
+ ptmidcrt   $1.
+ ptmidcdt   $8.
+ ptmidctm   $4.
+ ptmiintp   $1.
+ ptmidctp   $1.
+ VAR_PAT_REG_NO best32.
+ dgotdiag01 $6. dgotdggb01 best32. dgotdiag02 $6. dgotdggb02 best32.
+ dgotdiag03 $6. dgotdggb03 best32. dgotdiag04 $6. dgotdggb04 best32.
+ dgotdiag05 $6. dgotdggb05 best32. dgotdiag06 $6. dgotdggb06 best32.
+ dgotdiag07 $6. dgotdggb07 best32. dgotdiag08 $6. dgotdggb08 best32.
+ dgotdiag09 $6. dgotdggb09 best32. dgotdiag10 $6. dgotdggb10 best32.
+ dgotdiag11 $6. dgotdggb11 best32. dgotdiag12 $6. dgotdggb12 best32.
+ dgotdiag13 $6. dgotdggb13 best32. dgotdiag14 $6. dgotdggb14 best32.
+ dgotdiag15 $6. dgotdggb15 best32. dgotdiag16 $6. dgotdggb16 best32.
+ dgotdiag17 $6. dgotdggb17 best32. dgotdiag18 $6. dgotdggb18 best32.
+ dgotdiag19 $6. dgotdggb19 best32. dgotdiag20 $6. dgotdggb20 best32.
+ dgdcdiag01 $6. dgdcdggb01 best32. dgdcdiag02 $6. dgdcdggb02 best32.
+ dgdcdiag03 $6. dgdcdggb03 best32. dgdcdiag04 $6. dgdcdggb04 best32.
+ dgdcdiag05 $6. dgdcdggb05 best32. dgdcdiag06 $6. dgdcdggb06 best32.
+ dgdcdiag07 $6. dgdcdggb07 best32. dgdcdiag08 $6. dgdcdggb08 best32.
+ dgdcdiag09 $6. dgdcdggb09 best32. dgdcdiag10 $6. dgdcdggb10 best32.
+ dgdcdiag11 $6. dgdcdggb11 best32. dgdcdiag12 $6. dgdcdggb12 best32.
+ dgdcdiag13 $6. dgdcdggb13 best32. dgdcdiag14 $6. dgdcdggb14 best32.
+ dgdcdiag15 $6. dgdcdggb15 best32. dgdcdiag16 $6. dgdcdggb16 best32.
+ dgdcdiag17 $6. dgdcdggb17 best32. dgdcdiag18 $6. dgdcdggb18 best32.
+ dgdcdiag19 $6. dgdcdggb19 best32. dgdcdiag20 $6. dgdcdggb20 best32.
+ final_need2 $1.
+ final_prv2  $1.
+;
+input
+ ptmiemar ptmiemcl $ ptmiemnm ptmiindt $ ptmiintm $ ptmibrtd ptmisexx $ ptmigucd $ ptmiiukd
+ ptmiakdt $ ptmiaktm $ ptmidgkd $ ptmiarcf $ ptmiarcs $ ptmiinrt ptmiinmn ptmimnsy $ ptmimssr
+ ptmisym2 $ ptmisys2 ptmisym3 $ ptmisys3 ptmiemsy $ ptmiresp $ ptmikts1 $ ptmiktdt $ ptmikttm $
+ ptmikjob $ ptmikts2 $ ptmiarea $ ptmimdcd $ ptmisdcd $ ptmiemrt $ ptmihsrt $ ptmidept $
+ ptmiotdt $ ptmiottm $ ptmihsdt $ ptmihstm $ ptmidcrt $ ptmidcdt $ ptmidctm $ ptmiintp $ ptmidctp $
+ VAR_PAT_REG_NO
+ dgotdiag01 $ dgotdggb01 dgotdiag02 $ dgotdggb02 dgotdiag03 $ dgotdggb03 dgotdiag04 $ dgotdggb04
+ dgotdiag05 $ dgotdggb05 dgotdiag06 $ dgotdggb06 dgotdiag07 $ dgotdggb07 dgotdiag08 $ dgotdggb08
+ dgotdiag09 $ dgotdggb09 dgotdiag10 $ dgotdggb10 dgotdiag11 $ dgotdggb11 dgotdiag12 $ dgotdggb12
+ dgotdiag13 $ dgotdggb13 dgotdiag14 $ dgotdggb14 dgotdiag15 $ dgotdggb15 dgotdiag16 $ dgotdggb16
+ dgotdiag17 $ dgotdggb17 dgotdiag18 $ dgotdggb18 dgotdiag19 $ dgotdggb19 dgotdiag20 $ dgotdggb20
+ dgdcdiag01 $ dgdcdggb01 dgdcdiag02 $ dgdcdggb02 dgdcdiag03 $ dgdcdggb03 dgdcdiag04 $ dgdcdggb04
+ dgdcdiag05 $ dgdcdggb05 dgdcdiag06 $ dgdcdggb06 dgdcdiag07 $ dgdcdggb07 dgdcdiag08 $ dgdcdggb08
+ dgdcdiag09 $ dgdcdggb09 dgdcdiag10 $ dgdcdggb10 dgdcdiag11 $ dgdcdggb11 dgdcdiag12 $ dgdcdggb12
+ dgdcdiag13 $ dgdcdggb13 dgdcdiag14 $ dgdcdggb14 dgdcdiag15 $ dgdcdggb15 dgdcdiag16 $ dgdcdggb16
+ dgdcdiag17 $ dgdcdggb17 dgdcdiag18 $ dgdcdggb18 dgdcdiag19 $ dgdcdggb19 dgdcdiag20 $ dgdcdggb20
+ final_need2 $ final_prv2 $
+;
+PTMIIDNO = _n_;   /* 원자료에 없는 랜덤매칭키를 행번호로 합성 (2022년 단일 파일이라 그룹핑용으로 충분) */
+run;
 
 data save.PTM2022_GB;
 set work.PTM2022_raw;
-length _g $20;
-_g=strip(vvalue(PTMIGUCD));   /* 숫자/문자형 어느 쪽으로 읽혀도 동작 */
-if substr(_g,1,2)='47';
-drop _g;
+if substr(strip(ptmigucd),1,2)='47';
 run;
 
 proc datasets lib=work nolist; delete PTM2022_raw; quit;
@@ -288,15 +384,13 @@ set work.PTM2022_2;
 if emergency_dis=1;
 run;
 
-/* [수정] 원본은 BY 없이 merge (관측치 순서대로 붙는 one-to-one) -> 데이터가 줄어든 뒤에는 반드시 어긋남.
-   최종치료 필요 질환군(첨부 2, ptm_dt3)을 PTMIIDNO 로 결합 */
+/* [수정] 원본은 여기서 save.ptm_dt3(최종치료 필요 질환군, 첨부2)를 PTMIIDNO로 병합했으나,
+   2022 원자료는 이미 final_need2/final_prv2(최종치료 필요/제공 사례, 경북 소재 기관 한정)를
+   자체적으로 제공하므로 외부 병합이 불필요함 -> 그대로 통과만 시킴 */
 proc sort data=save.PTM2022_2; by PTMIIDNO; run;
-proc sort data=save.ptm_dt3 out=work.ptm_dt3_s; by PTMIIDNO; run;
 
 data save.PTM2022_3;
-merge save.PTM2022_2(in=a) work.ptm_dt3_s;
-by PTMIIDNO;
-if a;
+set save.PTM2022_2;
 run;
 
 proc freq data=save.PTM2022_3; tables emergency_dis_1-emergency_dis_28 / missing; run;   /* 질환별 건수 확인용 */
@@ -310,12 +404,18 @@ proc freq data=save.PTM2022_3; tables emergency_dis_1-emergency_dis_28 / missing
 data save.PTM2022_4;
 set save.PTM2022_3;
 
-year=substr(PTMIIDNO,9,4);
+/* [수정] PTMIIDNO는 0단계에서 합성한 행번호라 연도 정보가 없음 -> 2022 단일 파일이므로 상수로 지정 */
+year=2022;
 
 * 응급의료기관 종별;
- if PTMIEMCL eq "A" then h_type=1; *권역응급의료센터;
- if PTMIEMCL eq "C" then h_type=2; *지역응급의료센터;
- if PTMIEMCL eq "D" then h_type=3; *지역응급의료기관;
+/* [수정] 이 원자료의 PTMIEMCL은 'A'/'C'/'D' 코드가 아니라 '지역응급의료센터' 같은 한글 텍스트로
+   제공됨(로그에서 '지역응급의료센터','지역응급의료기관' 실측 확인). 정확한 전체 문자열을 몰라도
+   되도록 부분일치(index)로 판정. 분류가 3종 외에 더 있다면 h_type이 결측(.)으로 남으니
+   proc freq로 ptmiemcl 분포를 한 번 확인해볼 것 */
+ if index(ptmiemcl,'권역')>0 then h_type=1; *권역응급의료센터;
+ else if index(ptmiemcl,'지역응급의료센터')>0 then h_type=2; *지역응급의료센터;
+ else if index(ptmiemcl,'지역응급의료기관')>0 then h_type=3; *지역응급의료기관;
+ else h_type=.;
 
 *(응급의료기관지역 기준) 시도;
 if ptmiemar in(11680,11740,11305,11500,11620,11215,11530, 11545,11350,11320,
@@ -697,15 +797,13 @@ acute_em_dis=sum(emergency_dis_1, emergency_dis_2, emergency_dis_3, emergency_di
 /*급성기 중증응급질환이 하나라도 있는 사람*/
 if acute_em_dis>=1 then acute_em_5dis=1;
 
-/*최종치료제공*/
-/*분모*/
-if PTMIKTS1 in (1,2,3) or PTMIKTS2 in (1,2,3) then KTS=1;else KTS=0;
-if KTS=1 and em_dt=1 then KTS_DT=1; *(분모)최종치료 필요사례수;
-
-/*분자*/
-if KTS_DT=1 then do;
-if PTMIEMRT in ('42', '43', '44', '45', '48', '13', '31', '32', '33', '34', '38') then EMRT_DT=1; else  EMRT_DT=0;
-end;
+/* [수정] 최종치료제공률(KTS/KTS_DT/EMRT_DT) 계산 블록은 제거함.
+   - 원본은 별도 병합 데이터(em_dt)가 있어야 계산 가능했는데, 2022 파이프라인에서는
+     그 병합을 하지 않기로 함(3단계 참고).
+   - 이번에 필요한 분석은 (1)질환별 유출, (2)대구 소재 병원 유출, (3)대구 특정병원 유출
+     3가지뿐이고 최종치료제공률과는 무관하므로 범위에서 제외.
+   - 원자료의 final_need2/final_prv2는 "최종치료 필요 질환군(첨부1)" 기준의 전혀 다른
+     지표라 이 계산의 대체재가 아님 (필요해지면 별도로 다시 설계해야 함). */
 
 /*발병 24이내 급성기 평균 내원시간*/
 if acute_em_5dis=1 then do;
@@ -766,17 +864,17 @@ data save.PTM2022_5;
 set save.PTM2022_4;
 
 drop
-PTMIOINDT ak_mdy in_mdy out_mdy hs_mdy hsot_mdy ak_hms in_hms out_hms hs_hms hsot_hms ak_date_1 in_date_1 out_date_1
- hs_date_1 hsot_date_1 inout_time_m in24 c_level KTS ptmihsdt ptmihstm ptmidcrt
+ak_mdy in_mdy out_mdy hs_mdy hsot_mdy ak_hms in_hms out_hms hs_hms hsot_hms ak_date_1 in_date_1 out_date_1
+ hs_date_1 hsot_date_1 inout_time_m in24 c_level ptmihsdt ptmihstm ptmidcrt
 ptmimnsy ptmimssr ptmisym2 ptmisys2 ptmisym3 ptmisys3 ptmiemsy ptmiresp ptmiktdt ptmikttm ptmikjob ptmiarea ptmimdcd ptmidept
-ptmiotdt ptmiottm ptmidcdt ptmidctm ptmiintp ptmidctp acute_em_dis age_gp ptmiiukd ptmidgkd ptmiarcf ptmiarcs em_dt;
+ptmiotdt ptmiottm ptmidcdt ptmidctm ptmiintp ptmidctp acute_em_dis age_gp ptmiiukd ptmidgkd ptmiarcf ptmiarcs;
 
 label
-year="연도"
-ptmiidno="랜덤매칭키"
+year="연도(2022 고정)"
+ptmiidno="행 기반 합성 매칭키(원자료에 실제 랜덤매칭키 없음)"
 ptmiemar ="응급의료기관지역(시군구코드)"
 ptmiemcl="응급의료기관종별"
-ptmiemnm	="응급의료기관명"
+ptmiemnm	="응급의료기관 식별코드(익명화, 실제 기관명 아님)"
 ptmiindt="내원일자"
 ptmiintm="내원시간"
 ptmibrtd="연령"
@@ -854,9 +952,8 @@ gb_dg_topgo='(종합병원급이상)경북사람_대구병원'
 hp_gb_poh='(응급의료기관 기준)포항시'
 pa_gb_poh='(환자거주지 기준)포항시'
 
-KTS_DT='(분모)최종치료 필요사례수'
-EMRT_DT='최종치료 제공사례수 중 1번'
-EM_DT='(분자)최종치료 제공사례수';
+final_need2='(원자료 제공) 최종치료 필요사례 - 첨부1 질환군 기준, emergency_dis_1~28과는 다른 지표'
+final_prv2='(원자료 제공) 최종치료 제공사례 - 첨부1 질환군 기준, emergency_dis_1~28과는 다른 지표';
 
 run;
 
