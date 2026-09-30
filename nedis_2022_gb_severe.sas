@@ -1,35 +1,138 @@
 /**********************************************************************
-  NEDIS 2022 : 경상북도 + 28대 중증응급 축소 버전 (0~3단계)
-  - 4~5단계(주요 변수 정의)는 기존 코드를 그대로 쓰되 파일 하단의 "4~5단계 수정 사항"만 반영
+  NEDIS 2022 : 경상북도 + 28대 중증응급 축소 버전 (0~5단계)
+  - 실제 원자료: EMIHPTMI_2022.csv (공식 변수 44개 + dgotdiag/dgdcdiag 01~20 + final_need2/final_prv2)
+  - 2017~2021 파이프라인과의 차이점 (원자료 공식 변수설명서 기준으로 확인/반영):
+      1) PTMIIDNO(랜덤매칭키)가 이 파일에는 없음 -> 0단계에서 행번호로 합성한 PTMIIDNO를
+         생성해서 이후 단계(정렬/병합 키)는 전부 그대로 사용 (매크로/코드 수정 불필요)
+      2) 원본의 save.ptm_dt3(최종치료 필요 질환군, 첨부2) 외부 병합 단계는 제거함.
+         원자료에 이미 final_need2/final_prv2(최종치료 필요/제공 사례, 경북 소재 기관 한정)가
+         제공되지만, 이번 분석 목적(질환별/대구 유출)과는 무관한 별개 지표라 5단계에서 drop함
+         (필요해지면 별도로 다시 설계해서 살릴 것)
+      3) PTMIEMCL(응급의료기관종별) 값이 'A'/'C'/'D' 코드가 아니라 '권역응급의료센터' 같은
+         한글 텍스트로 제공됨 -> 4단계 h_type 판정을 index() 부분일치로 변경
   - 흐름
-      0단계  원자료 import -> 경북(환자 거주지 OR 응급의료기관 소재지)만 추출  -> save.PTM2022_GB
+      0단계  원자료 import -> 경북(환자 거주지 기준)만 추출                    -> save.PTM2022_GB
       2단계  중증외상(ICISS/SRR 2020) 산출 (경북 데이터에만 수행)              -> save.otdc_srr
       3단계  클리닝 + 28대 중증응급 정의 후 emergency_dis=1 만 추출            -> save.PTM2022_3
+      4단계  지역(시도/시군구/진료권/응급의료권역), 대구 특정병원 등 주요 변수 정의 -> save.PTM2022_4
+      5단계  변수 정리(drop/label) + 경북 최종 데이터셋 추출                   -> save.PTM2022_5 / save.pa_area / save.hp_area
+  - 아래 분석은 save.PTM2022_5(=save.pa_area)의 변수만으로 바로 가능:
+      1) 질환별 유출 현황     : emergency_dis_1~28 × gb_sigu_out/gb_sido_out/gb_6gr/gb_4gr
+      2) 대구 소재 병원 유출  : daegu, daegu_top, ttop_dg, gb_dg_go, gb_dg_topgo
+      3) 대구 특정 6개 병원   : gb_hp, gb_hp_yu, gb_hp_ga, gb_hp_ch, gb_hp_gae, gb_hp_pati
+         (PTMIEMNM은 실제 기관명이 아니라 "기관식별코드 대체"(익명 코드)라서, 이 6개 외
+          다른 병원을 보려면 그 병원의 익명 코드값을 먼저 알아내야 함)
 **********************************************************************/
 
 libname save '\\172.30.1.200\경북지원단\경북지원단\공공보건의료 협력체계 구축사업 기초조사 위탁 용역\응급 NEDIS 임시';
 
 /*--------------------------------------------------------------------
   0단계: import 후 경북만 추출
-   - 환자 거주지(PTMIGUCD) 또는 응급의료기관 소재지(PTMIEMAR)가 47xxx
-     (pa_area=15 / hp_area=15 두 최종 데이터셋과 gb_dg_go(경북민->대구병원)를 모두 커버)
-   - GUESSINGROWS=MAX : 450000행 이후에 '-' 등 문자가 나오면 숫자형으로 잘못 추정되어
-     값이 결측 처리될 수 있어서 MAX 로 변경 (느리면 다시 낮추되 변수 타입 확인 필요)
+   - PROC IMPORT(GUESSINGROWS) 대신 INFILE/INPUT을 직접 선언한 1-pass 방식으로 변경.
+     '-'/'1111'류 결측 코드가 들어올 수 있는 날짜·시간·분류 필드는 전부 문자형으로 지정해서
+     GUESSINGROWS 스캔 자체를 없앰(더 빠르고, 타입 오추정으로 인한 invalid data 오류도 없음).
+   - PTMIIDNO가 원자료에 없어서, 행번호를 그대로 PTMIIDNO로 합성해 이후 단계 호환.
+   - 환자 거주지(PTMIGUCD)가 47xxx인 건만 남김 (응급의료기관 소재지는 보지 않음
+     -> 경북 밖 병원을 이용한 경북 거주자의 대구 유출(gb_dg_go) 등, 응급의료기관
+        소재지 기준 분석이 필요해지면 이 조건에 PTMIEMAR 조건을 다시 추가할 것)
 --------------------------------------------------------------------*/
-PROC IMPORT OUT=work.PTM2022_raw
-DATAFILE="\\172.30.1.200\경북지원단\경북지원단\경상북도 응급의료지원단\NEDIS\JE20241103\JE20241103\2022.csv"
-DBMS=csv REPLACE;
-GETNAMES=YES;
-GUESSINGROWS=MAX;
-RUN;
+data work.PTM2022_raw;
+infile "\\172.30.1.200\경북지원단\경북지원단\경상북도 응급의료지원단\NEDIS\JE20241103\JE20241103\EMIHPTMI_2022.csv"
+delimiter=',' MISSOVER DSD lrecl=32767 firstobs=2;
+informat
+ ptmiemar   best32.
+ ptmiemcl   $16.
+ ptmiemnm   best32.
+ ptmiindt   $8.      /* '-'/'11111111' 대비 문자형 (원본 numeric 추정 시 invalid data 발생) */
+ ptmiintm   $4.      /* '-'/'1111' 대비 문자형 */
+ ptmibrtd   best32.
+ ptmisexx   $1.
+ ptmigucd   $5.
+ ptmiiukd   best32.
+ ptmiakdt   $8.      /* '-' 대비 문자형 (752385행부터 '-' 등장, 이번 오류 원인 컬럼) */
+ ptmiaktm   $4.      /* '-' 대비 문자형 (위와 동일 원인) */
+ ptmidgkd   $1.      /* '-' 대비 문자형 */
+ ptmiarcf   $1.
+ ptmiarcs   $2.
+ ptmiinrt   best32.
+ ptmiinmn   best32.
+ ptmimnsy   $8.
+ ptmimssr   best32.
+ ptmisym2   $8.
+ ptmisys2   best32.
+ ptmisym3   $8.
+ ptmisys3   best32.
+ ptmiemsy   $1.
+ ptmiresp   $1.
+ ptmikts1   $1.      /* '-' 대비 문자형 */
+ ptmiktdt   $8.      /* '-'/'11111111' 대비 문자형 */
+ ptmikttm   $4.      /* '-'/'1111' 대비 문자형 */
+ ptmikjob   $1.
+ ptmikts2   $1.
+ ptmiarea   $1.
+ ptmimdcd   $1.
+ ptmisdcd   $1.
+ ptmiemrt   $2.
+ ptmihsrt   $2.
+ ptmidept   $2.
+ ptmiotdt   $8.      /* '-'/'11111111' 대비 문자형 */
+ ptmiottm   $4.      /* '-'/'1111' 대비 문자형 */
+ ptmihsdt   $8.
+ ptmihstm   $4.
+ ptmidcrt   $1.
+ ptmidcdt   $8.
+ ptmidctm   $4.
+ ptmiintp   $1.
+ ptmidctp   $1.
+ VAR_PAT_REG_NO best32.
+ dgotdiag01 $6. dgotdggb01 best32. dgotdiag02 $6. dgotdggb02 best32.
+ dgotdiag03 $6. dgotdggb03 best32. dgotdiag04 $6. dgotdggb04 best32.
+ dgotdiag05 $6. dgotdggb05 best32. dgotdiag06 $6. dgotdggb06 best32.
+ dgotdiag07 $6. dgotdggb07 best32. dgotdiag08 $6. dgotdggb08 best32.
+ dgotdiag09 $6. dgotdggb09 best32. dgotdiag10 $6. dgotdggb10 best32.
+ dgotdiag11 $6. dgotdggb11 best32. dgotdiag12 $6. dgotdggb12 best32.
+ dgotdiag13 $6. dgotdggb13 best32. dgotdiag14 $6. dgotdggb14 best32.
+ dgotdiag15 $6. dgotdggb15 best32. dgotdiag16 $6. dgotdggb16 best32.
+ dgotdiag17 $6. dgotdggb17 best32. dgotdiag18 $6. dgotdggb18 best32.
+ dgotdiag19 $6. dgotdggb19 best32. dgotdiag20 $6. dgotdggb20 best32.
+ dgdcdiag01 $6. dgdcdggb01 best32. dgdcdiag02 $6. dgdcdggb02 best32.
+ dgdcdiag03 $6. dgdcdggb03 best32. dgdcdiag04 $6. dgdcdggb04 best32.
+ dgdcdiag05 $6. dgdcdggb05 best32. dgdcdiag06 $6. dgdcdggb06 best32.
+ dgdcdiag07 $6. dgdcdggb07 best32. dgdcdiag08 $6. dgdcdggb08 best32.
+ dgdcdiag09 $6. dgdcdggb09 best32. dgdcdiag10 $6. dgdcdggb10 best32.
+ dgdcdiag11 $6. dgdcdggb11 best32. dgdcdiag12 $6. dgdcdggb12 best32.
+ dgdcdiag13 $6. dgdcdggb13 best32. dgdcdiag14 $6. dgdcdggb14 best32.
+ dgdcdiag15 $6. dgdcdggb15 best32. dgdcdiag16 $6. dgdcdggb16 best32.
+ dgdcdiag17 $6. dgdcdggb17 best32. dgdcdiag18 $6. dgdcdggb18 best32.
+ dgdcdiag19 $6. dgdcdggb19 best32. dgdcdiag20 $6. dgdcdggb20 best32.
+ final_need2 $1.
+ final_prv2  $1.
+;
+input
+ ptmiemar ptmiemcl $ ptmiemnm ptmiindt $ ptmiintm $ ptmibrtd ptmisexx $ ptmigucd $ ptmiiukd
+ ptmiakdt $ ptmiaktm $ ptmidgkd $ ptmiarcf $ ptmiarcs $ ptmiinrt ptmiinmn ptmimnsy $ ptmimssr
+ ptmisym2 $ ptmisys2 ptmisym3 $ ptmisys3 ptmiemsy $ ptmiresp $ ptmikts1 $ ptmiktdt $ ptmikttm $
+ ptmikjob $ ptmikts2 $ ptmiarea $ ptmimdcd $ ptmisdcd $ ptmiemrt $ ptmihsrt $ ptmidept $
+ ptmiotdt $ ptmiottm $ ptmihsdt $ ptmihstm $ ptmidcrt $ ptmidcdt $ ptmidctm $ ptmiintp $ ptmidctp $
+ VAR_PAT_REG_NO
+ dgotdiag01 $ dgotdggb01 dgotdiag02 $ dgotdggb02 dgotdiag03 $ dgotdggb03 dgotdiag04 $ dgotdggb04
+ dgotdiag05 $ dgotdggb05 dgotdiag06 $ dgotdggb06 dgotdiag07 $ dgotdggb07 dgotdiag08 $ dgotdggb08
+ dgotdiag09 $ dgotdggb09 dgotdiag10 $ dgotdggb10 dgotdiag11 $ dgotdggb11 dgotdiag12 $ dgotdggb12
+ dgotdiag13 $ dgotdggb13 dgotdiag14 $ dgotdggb14 dgotdiag15 $ dgotdggb15 dgotdiag16 $ dgotdggb16
+ dgotdiag17 $ dgotdggb17 dgotdiag18 $ dgotdggb18 dgotdiag19 $ dgotdggb19 dgotdiag20 $ dgotdggb20
+ dgdcdiag01 $ dgdcdggb01 dgdcdiag02 $ dgdcdggb02 dgdcdiag03 $ dgdcdggb03 dgdcdiag04 $ dgdcdggb04
+ dgdcdiag05 $ dgdcdggb05 dgdcdiag06 $ dgdcdggb06 dgdcdiag07 $ dgdcdggb07 dgdcdiag08 $ dgdcdggb08
+ dgdcdiag09 $ dgdcdggb09 dgdcdiag10 $ dgdcdggb10 dgdcdiag11 $ dgdcdggb11 dgdcdiag12 $ dgdcdggb12
+ dgdcdiag13 $ dgdcdggb13 dgdcdiag14 $ dgdcdggb14 dgdcdiag15 $ dgdcdggb15 dgdcdiag16 $ dgdcdggb16
+ dgdcdiag17 $ dgdcdggb17 dgdcdiag18 $ dgdcdggb18 dgdcdiag19 $ dgdcdggb19 dgdcdiag20 $ dgdcdggb20
+ final_need2 $ final_prv2 $
+;
+PTMIIDNO = _n_;   /* 원자료에 없는 랜덤매칭키를 행번호로 합성 (2022년 단일 파일이라 그룹핑용으로 충분) */
+run;
 
 data save.PTM2022_GB;
 set work.PTM2022_raw;
-length _g _e $20;
-_g=strip(vvalue(PTMIGUCD));   /* 숫자/문자형 어느 쪽으로 읽혀도 동작 */
-_e=strip(vvalue(PTMIEMAR));
-if substr(_g,1,2)='47' or substr(_e,1,2)='47';
-drop _g _e;
+if substr(strip(ptmigucd),1,2)='47';
 run;
 
 proc datasets lib=work nolist; delete PTM2022_raw; quit;
@@ -144,21 +247,25 @@ by PTMIIDNO;
 if a;
 run;
 
-
 /**********************************************************
       3단계: 데이터 클리닝 및 28대 중증응급 정의
        퇴실 또는 퇴원 진단코드(구분 1,2) 중 하나라도 해당하면 중증응급
  **********************************************************/
 
-/* &n번 질환, 진단코드 앞 &len자리가 &codes(공백 구분) 중 하나이면 td(퇴실)/cd(퇴원)=1 */
+/* &n번 질환, 진단코드 앞 &len자리가 &codes 중 하나이면 td(퇴실)/cd(퇴원)=1
+   [수정2] findw() 방식, 그리고 그 다음 시도한 매크로 내부 동적 quoted-list 조립 방식
+   둘 다 실제로는 매칭이 전혀 안 되는 문제가 있었음(원인 특정 못함).
+   -> 2단계 ICISS의 trauma_codes와 완전히 동일한 방식으로 되돌림: codes는 처음부터
+   'I63','I64' 형태로 완전히 하드코드해서 넘기고(각 호출부에서 %str()로 감싸 콤마가
+   매크로 인자 구분자로 오인되지 않게 함), in() 연산자로 직접 비교. 동적 조립 없음. */
 %macro dis(n=, len=, codes=);
   %local i k;
   %do i=1 %to 20;
     %let k=%sysfunc(putn(&i,z2.));
     if strip(vvalue(DGOTDGGB&k)) in ('1','2') and not missing(DGOTDIAG&k)
-       and findw("&codes", strip(substr(DGOTDIAG&k,1,&len)), ' ', 't')>0 then emergency_dis_td_&n=1;
+       and substr(DGOTDIAG&k,1,&len) in (&codes) then emergency_dis_td_&n=1;
     if strip(vvalue(DGDCDGGB&k)) in ('1','2') and not missing(DGDCDIAG&k)
-       and findw("&codes", strip(substr(DGDCDIAG&k,1,&len)), ' ', 't')>0 then emergency_dis_cd_&n=1;
+       and substr(DGDCDIAG&k,1,&len) in (&codes) then emergency_dis_cd_&n=1;
   %end;
 %mend;
 
@@ -200,67 +307,67 @@ array cd {28} emergency_dis_cd_1-emergency_dis_cd_28;
 array ds {28} emergency_dis_1-emergency_dis_28;
 
 *1 심근경색증(MI);
-%dis(n=1,  len=3, codes=I21)
+%dis(n=1,  len=3, codes=%str('I21'))
 *2 허혈성뇌졸중(IS);
-%dis(n=2,  len=3, codes=I63 I64)
+%dis(n=2,  len=3, codes=%str('I63','I64'))
 *3 뇌실질출혈(CPD);
-%dis(n=3,  len=3, codes=I61 I62)
+%dis(n=3,  len=3, codes=%str('I61','I62'))
 *4 거미막하출혈(SH);
-%dis(n=4,  len=3, codes=I60)
+%dis(n=4,  len=3, codes=%str('I60'))
 *5 중증외상(MT): 2단계 ICISS 결과;
 if iciss_09_ot=1 then emergency_dis_td_5=1;
 if iciss_09_dc=1 then emergency_dis_cd_5=1;
 *6 대동맥박리(AD);
-%dis(n=6,  len=4, codes=I710 I711 I713 I715 I718)
+%dis(n=6,  len=4, codes=%str('I710','I711','I713','I715','I718'))
 *7 담낭담관질환;
-%dis(n=7,  len=4, codes=K800 K801 K803 K804 K805 K819 K830 K831)
+%dis(n=7,  len=4, codes=%str('K800','K801','K803','K804','K805','K819','K830','K831'))
 *8 외과계질환(장중첩/폐색 별도);
-%dis(n=8,  len=4, codes=K352 K353 K631 K661)
-%dis(n=8,  len=3, codes=K65)
+%dis(n=8,  len=4, codes=%str('K352','K353','K631','K661'))
+%dis(n=8,  len=3, codes=%str('K65'))
 *9 위장관출혈/이물질;
-%dis(n=9,  len=4, codes=I850 I864 I983 K226 K250 K252 K254 K256 K260 K262 K264 K266 K920 K921 K922 T181)
+%dis(n=9,  len=4, codes=%str('I850','I864','I983','K226','K250','K252','K254','K256','K260','K262','K264','K266','K920','K921','K922','T181'))
 *10 기관지출혈/이물질;
-%dis(n=10, len=4, codes=R042 R048 R049 T174 T175 T178 T179)
+%dis(n=10, len=4, codes=%str('R042','R048','R049','T174','T175','T178','T179'))
 *11 중독(CO포함);
-%dis(n=11, len=3, codes=T36 T37 T38 T39 T40 T41 T42 T43 T44 T45 T46 T47 T48 T49 T50 T51 T52 T53 T54 T55 T56 T57 T58 T59 T60 T61 T62 T63 T64 T65)
+%dis(n=11, len=3, codes=%str('T36','T37','T38','T39','T40','T41','T42','T43','T44','T45','T46','T47','T48','T49','T50','T51','T52','T53','T54','T55','T56','T57','T58','T59','T60','T61','T62','T63','T64','T65'))
 *12 주산기질환;
-%dis(n=12, len=3, codes=O00 O14 O15 O45 O60 O72 O80 O82)
-%dis(n=12, len=4, codes=O420 O421 O422 O429 O622)
+%dis(n=12, len=3, codes=%str('O00','O14','O15','O45','O60','O72','O80','O82'))
+%dis(n=12, len=4, codes=%str('O420','O421','O422','O429','O622'))
 *13 조산아/저체중아;
-%dis(n=13, len=3, codes=P07 P22 P24 P36 P52 P59)
+%dis(n=13, len=3, codes=%str('P07','P22','P24','P36','P52','P59'))
 *14 중증화상;
-%dis(n=14, len=4, codes=T203 T207 T213 T217 T313 T314 T315 T316 T317 T318 T319)
+%dis(n=14, len=4, codes=%str('T203','T207','T213','T217','T313','T314','T315','T316','T317','T318','T319'))
 *15 간질지속상태;
-%dis(n=15, len=3, codes=G41)
+%dis(n=15, len=3, codes=%str('G41'))
 *16 뇌수막염;
-%dis(n=16, len=3, codes=A83 A84 A85 A86 A87 G00 G01 G02 G03 G04 G05 G06 G07)
+%dis(n=16, len=3, codes=%str('A83','A84','A85','A86','A87','G00','G01','G02','G03','G04','G05','G06','G07'))
 *17 패혈증;
-%dis(n=17, len=4, codes=A021 A227 A241 A267 A400 A401 A402 A403 A404 A405 A406 A407 A408 A409 A410 A411 A412 A413 A414 A419 A427 B007 B377)
+%dis(n=17, len=4, codes=%str('A021','A227','A241','A267','A400','A401','A402','A403','A404','A405','A406','A407','A408','A409','A410','A411','A412','A413','A414','A419','A427','B007','B377'))
 *18 당뇨병성 혼수;
-%dis(n=18, len=4, codes=E100 E101 E110 E111 E130 E131 E140 E141)
+%dis(n=18, len=4, codes=%str('E100','E101','E110','E111','E130','E131','E140','E141'))
 *19 폐색전/DVT;
-%dis(n=19, len=4, codes=I260 I269 I802)
+%dis(n=19, len=4, codes=%str('I260','I269','I802'))
 *20 부정맥;
-%dis(n=20, len=3, codes=I45 I48)
-%dis(n=20, len=4, codes=I441 I442 I472 I490 I495 I498 I499)
+%dis(n=20, len=3, codes=%str('I45','I48'))
+%dis(n=20, len=4, codes=%str('I441','I442','I472','I490','I495','I498','I499'))
 *21 ARDS/폐부종;
-%dis(n=21, len=3, codes=J80 J81 J85 J86 J96)
+%dis(n=21, len=3, codes=%str('J80','J81','J85','J86','J96'))
 *22 DIC;
-%dis(n=22, len=3, codes=D65)
+%dis(n=22, len=3, codes=%str('D65'))
 *23 장중첩/폐색;
-%dis(n=23, len=4, codes=K561 K562 K563 K565 K566)
+%dis(n=23, len=4, codes=%str('K561','K562','K563','K565','K566'))
 *24 사지절단;
-%dis(n=24, len=3, codes=S48 S58 S68 S78 S88 T05)
-%dis(n=24, len=4, codes=S980 S981 S982 S983 S984 T060 T061 T062 T063 T064 T065 T066 T067 T068 T116 T136)
+%dis(n=24, len=3, codes=%str('S48','S58','S68','S78','S88','T05'))
+%dis(n=24, len=4, codes=%str('S980','S981','S982','S983','S984','T060','T061','T062','T063','T064','T065','T066','T067','T068','T116','T136'))
 *25 급성신부전;
-%dis(n=25, len=3, codes=N17)
+%dis(n=25, len=3, codes=%str('N17'))
 *26 안과적 응급;
-%dis(n=26, len=3, codes=H33 H34 H40 H42)
+%dis(n=26, len=3, codes=%str('H33','H34','H40','H42'))
 *27 소생술 후 상태;
-%dis(n=27, len=3, codes=I46)
+%dis(n=27, len=3, codes=%str('I46'))
 *28 비뇨기과 응급;
-%dis(n=28, len=3, codes=N44)
-%dis(n=28, len=4, codes=N450 N459)
+%dis(n=28, len=3, codes=%str('N44'))
+%dis(n=28, len=4, codes=%str('N450','N459'))
 
 do j=1 to 28;
   if cd{j}=1 or td{j}=1 then ds{j}=1;   /* 질환별: 퇴실 또는 퇴원 */
@@ -281,34 +388,463 @@ set work.PTM2022_2;
 if emergency_dis=1;
 run;
 
-/* [수정] 원본은 BY 없이 merge (관측치 순서대로 붙는 one-to-one) -> 데이터가 줄어든 뒤에는 반드시 어긋남.
-   최종치료 필요 질환군(첨부 2, ptm_dt3)을 PTMIIDNO 로 결합 */
+/* [수정] 원본은 여기서 save.ptm_dt3(최종치료 필요 질환군, 첨부2)를 PTMIIDNO로 병합했으나,
+   2022 원자료는 이미 final_need2/final_prv2(최종치료 필요/제공 사례, 경북 소재 기관 한정)를
+   자체적으로 제공하므로 외부 병합이 불필요함 -> 그대로 통과만 시킴 */
 proc sort data=save.PTM2022_2; by PTMIIDNO; run;
-proc sort data=save.ptm_dt3 out=work.ptm_dt3_s; by PTMIIDNO; run;
 
 data save.PTM2022_3;
-merge save.PTM2022_2(in=a) work.ptm_dt3_s;
-by PTMIIDNO;
-if a;
+set save.PTM2022_2;
 run;
 
 proc freq data=save.PTM2022_3; tables emergency_dis_1-emergency_dis_28 / missing; run;   /* 질환별 건수 확인용 */
 
 
 /**********************************************************************
-  4~5단계: 기존 코드에서 아래 4곳만 수정 (입력은 그대로 save.PTM2022_3)
+  4단계: 유출 현황 분석에 필요한 변수만 정의 (지역/진료권/응급의료권역, 대구 특정병원)
+  - 목표 분석 3가지(1.질환별 유출 2.대구 소재 병원 유출 3.대구 특정병원 유출)에
+    불필요한 연령/성별/내원경로/체류시간/전원사유/사망률/최종치료제공률 등은 전부 제외.
+    (원본 4단계 전체 로직은 git 이력에서 확인 가능)
 **********************************************************************/
-/* (1) 응급실 입실 일자 시간: 대입 변수 오타 (PTMIOINDT -> PTMIINDT)
-       [원본] if PTMIINDT in ('11111111', '-') then PTMIOINDT=""; else PTMIINDT=PTMIINDT;
-       [수정] if PTMIINDT in ('11111111', '-') then PTMIINDT=""; else PTMIINDT=PTMIINDT;
-       -> 원본은 '11111111'/'-' 가 그대로 남아 in_mdy 계산에 잘못 들어감 */
+data save.PTM2022_4;
+set save.PTM2022_3;
 
-/* (2) 연령(2) 의 마지막 else: age_2gp 가 아니라 age_gp 를 결측으로 만들고 있음
-       [원본] else age_gp=.;      (age_2gp 블록 마지막 줄)
-       [수정] else age_2gp=.;                                              */
+/* [수정] PTMIIDNO는 0단계에서 합성한 행번호라 연도 정보가 없음 -> 2022 단일 파일이므로 상수로 지정 */
+year=2022;
 
-/* (3) 최종 경북 데이터셋 추출: 범위 삭제 방식은 pa_area/hp_area 결측도 남김 -> where 로 변경
-       data save.pa_area; set save.PTM2022_5; where pa_area=15; run;
-       data save.hp_area; set save.PTM2022_5; where hp_area=15; run;        */
+* 응급의료기관 종별;
+/* [수정] 이 원자료의 PTMIEMCL은 'A'/'C'/'D' 코드가 아니라 '지역응급의료센터' 같은 한글 텍스트로
+   제공됨(로그에서 '지역응급의료센터','지역응급의료기관' 실측 확인). 정확한 전체 문자열을 몰라도
+   되도록 부분일치(index)로 판정. 분류가 3종 외에 더 있다면 h_type이 결측(.)으로 남으니
+   proc freq로 ptmiemcl 분포를 한 번 확인해볼 것 */
+ if index(ptmiemcl,'권역')>0 then h_type=1; *권역응급의료센터;
+ else if index(ptmiemcl,'지역응급의료센터')>0 then h_type=2; *지역응급의료센터;
+ else if index(ptmiemcl,'지역응급의료기관')>0 then h_type=3; *지역응급의료기관;
+ else h_type=.;
 
-/* (4) 4단계 시작부 dataset 이름은 그대로:  data save.PTM2022_4; set save.PTM2022_3; ...  */
+*(응급의료기관지역 기준) 시도;
+if ptmiemar in(11680,11740,11305,11500,11620,11215,11530, 11545,11350,11320,
+11230,11590,11440,11410,11650,11200,11290,11710,11470,11560,11170,11380,
+11110,11140,11260) then hp_area=1; *서울;
+else if ptmiemar in(26110,26140,26170,26200,26230,26260,26290,26320,
+26350, 26380,26410,26440,26470,26500,26530,26710) then hp_area=2; *부산;
+else if ptmiemar in(27110,27140,27170,27200,27230,27260,27290,27710) then hp_area=3; *대구;
+else if ptmiemar in(28110,28140,28170,28185,28200,28237,28245,28260,28710,28720) then hp_area=4; *인천;
+else if ptmiemar in(29110,29140,29155,29170,29200) then hp_area=5; *광주;
+else if ptmiemar in(30110,30140,30170,30200,30230) then hp_area=6; *대전;
+else if ptmiemar in(31110,31140,31170,31200,31710) then hp_area=7; *울산;
+else if ptmiemar=36110 then hp_area=8; *세종;
+else if ptmiemar in(41820,41281,41285,41287,41290,41210,41610,41310,41410, 41570,
+41360,41250,41197,41199,41195,41135,41131,41133,41113,41117,41111,41115,41390,
+41273,41271,41550,41173,41171,41630,41830,41670,41800,41370,41463,41465, 41461,
+41430,41150,41500,41480,41220,41650,41450,41590) then hp_area=9; *경기;
+else if ptmiemar in(42150,42820,42170,42230,42210,42800,42830,42750,42130,42810,
+42770,42780,42110,42190,42760,42720,42790,42730) then hp_area=10; *강원도;
+else if ptmiemar in(43760,43800,43720,43740,43730,43770,43150,43745, 43750,
+43111,43112,43114,43113,43130) then hp_area=11; *충북;
+else if ptmiemar in(44250,44150,44710,44230,44270,44180,44760,44210,44770,44200,
+44810,44131,44133,44790,44825,44800) then hp_area=12; *충남;
+else if ptmiemar in(45790,45130,45210,45190,45730,45800,45770,45710,45140,45750,
+45740,45113,45111,45180,45720) then hp_area=13; *전북;
+else if ptmiemar in(46810,46770,46720,46230,46730,46170,46710,46110,46840,46780,
+46150,46910,46130,46870,46830,46890,46880,46800,46900,46860,46820,46790) then hp_area=14; *전남;
+else if ptmiemar in(47290,47130,47830,47190,47720,47150,47280,47920,47250,47840,47170,47770,
+47760,47210,47230,47900,47940,47930,47730,47820,47750,47850,47111,47113) then hp_area=15; *경북;
+else if ptmiemar in(48310,48880,48820,48250,48840,48270,48240,48860,48330,48720,
+48170,48740,48125,48127,48123,48121,48129,48220,48850,48730,48870,48890) then hp_area=16; *경남;
+else if ptmiemar in(50110,50130) then hp_area=17; *제주;
+else hp_area=.;
+
+*(응급의료기관지역 기준) 경상북도 시군구별;
+if ptmiemar eq "47111" then hp_gb=1; *포항시남구;
+if ptmiemar eq "47113" then hp_gb=2; *포항시북구;
+if ptmiemar eq "47130" then hp_gb=3; *경주시;
+if ptmiemar eq "47150" then hp_gb=4; *김천시;
+if ptmiemar eq "47170" then hp_gb=5; *안동시;
+if ptmiemar eq "47190" then hp_gb=6; *구미시;
+if ptmiemar eq "47210" then hp_gb=7; *영주시;
+if ptmiemar eq "47230" then hp_gb=8; *영천시;
+if ptmiemar eq "47250" then hp_gb=9; *상주시;
+if ptmiemar eq "47280" then hp_gb=10; *문경시;
+if ptmiemar eq "47290" then hp_gb=11; *경산시;
+if ptmiemar eq "47720" then hp_gb=12; *군위군;
+if ptmiemar eq "47730" then hp_gb=13; *의성군;
+if ptmiemar eq "47750" then hp_gb=14; *청송군;
+if ptmiemar eq "47760" then hp_gb=15; *영양군;
+if ptmiemar eq "47770" then hp_gb=16; *영덕군;
+if ptmiemar eq "47820" then hp_gb=17; *청도군;
+if ptmiemar eq "47830" then hp_gb=18; *고령군;
+if ptmiemar eq "47840" then hp_gb=19; *성주군;
+if ptmiemar eq "47850" then hp_gb=20; *칠곡군;
+if ptmiemar eq "47900" then hp_gb=21; *예천군;
+if ptmiemar eq "47920" then hp_gb=22; *봉화군;
+if ptmiemar eq "47930" then hp_gb=23; *울진군;
+if ptmiemar eq "47940" then hp_gb=24; *울릉군;
+
+if hp_gb in(1,2) then hp_gb_poh=1; *포항시;
+
+* (응급의료기관지역 기준) 경상북도 6개 진료권;
+if hp_gb in(1,2,16,23,24) then hp_hsa_gb=1;  *포항권;
+else if hp_gb in(3,11,8,17) then hp_hsa_gb=2;  *경주권;
+else if hp_gb in(5,13,14,15) then hp_hsa_gb=3; *안동권;
+else if hp_gb in(6,20,12,4,19,18) then hp_hsa_gb=4; *구미권;
+else if hp_gb in(7,21,22) then hp_hsa_gb=5; *영주권;
+else if hp_gb in(9,10) then hp_hsa_gb=6; *상주권;
+else hp_hsa_gb=.;
+
+* (응급의료기관지역 기준) 응급의료권역;
+if hp_gb in(5,10,22,15,7,21,13,14) then hp_em_gb=1; *경북안동권;
+else if hp_gb in(6,4,20,9) then hp_em_gb=2; *경북구미권;
+else if hp_gb in(1,2,3,16,23,24) then hp_em_gb=3; *경북포항권;
+else if hp_gb in(11,18,12,19,8,17) then hp_em_gb=4; *대구권;
+else hp_em_gb=.;
+
+/************************************************
+   (환자주소지 기준) 시도, 시군구, 진료권, 응급의료권역
+*************************************************/
+
+* (환자주소지 기준) 시도;
+if ptmigucd in(11680,11740,11305,11500,11620,11215,11530,
+11545,11350,11320,11230,11590,11440,11410,11650,11200,
+11290,11710,11470,11560,11170,11380,11110,11140,11260) then pa_area=1; *서울;
+else if ptmigucd in(26110,26140,26170,26200,26230,26260,
+26290,26320,26350,26380,26410,26440,26470,26500,26530,26710) then pa_area=2; *부산;
+else if ptmigucd in(27110,27140,27170,27200,27230,27260,27290,27710) then pa_area=3; *대구;
+else if ptmigucd in(28110,28140,28170,28177,28185,28200,28237,28245,28260,28710,28720) then pa_area=4; *인천;
+else if ptmigucd in(29110,29140,29155,29170,29200) then pa_area=5; *광주;
+else if ptmigucd in(30110,30140,30170,30200,30230) then pa_area=6; *대전;
+else if ptmigucd in(31110,31140,31170,31200,31710) then pa_area=7; *울산;
+else if ptmigucd=36110 then pa_area=8; *세종;
+else if ptmigucd in(41111,41113,41115,41117,41131,41133,41135,41150,41171,
+41173,41190,41195,41197,41199,41210,41220,41250,41271,41273,41281,41285,
+41287,41290,41310,41360,41370,41390,41410,41430,41450,41461,41463,41465,
+41480,41500,41550,41570,41590,41610,41630,41650,41670,41800,41820,41830) then pa_area=9; *경기;
+else if ptmigucd in(42150,42820,42170,42230,42210,42800,42830,42750,42130,
+42810,42770,42780,42110,42190,42760,42720,42790,42730) then pa_area=10; *강원도;
+else if ptmigucd in(43760,43800,43720,43740,43730,43770,43150,43745,
+43750,43111,43112,43114,43113,43130) then pa_area=11; *충북;
+else if ptmigucd in(44250,44150,44710,44230,44270,44180,44760,44210,
+44770,44200,44810,44131,44133,44790,44825,44800) then pa_area=12; *충남;
+else if ptmigucd in(45790,45130,45210,45190,45730,45800,45770,45710,
+45140,45750,45740,45113,45111,45180,45720) then pa_area=13; *전북;
+else if ptmigucd in(46810,46770,46720,46230,46730,46170,46710,46110,46840,46780,46150,
+46910,46130,46870,46830,46890,46880,46800,46900,46860,46820,46790) then pa_area=14; *전남;
+else if ptmigucd in(47290,47130,47830,47190,47720,47150,47280,47920,47250,47840,47170,
+47770,47760,47210,47230,47900,47940,47930,47730,47820,47750,47850,47111,47113) then pa_area=15; *경북;
+else if ptmigucd in(48310,48880,48820,48250,48840,48270,48240,48860,48330,48720,
+48170,48740,48125,48127,48123,48121,48129,48220,48850,48730,48870,48890) then pa_area=16; *경남;
+else if ptmigucd in(50110,50130) then pa_area=17; *제주;
+else pa_area=.;
+
+* (환자주소지 기준) 경상북도 시군구;
+if ptmigucd eq "47111" then pa_gb=1; *포항시남구;
+if ptmigucd eq "47113" then pa_gb=2; *포항시북구;
+if ptmigucd eq "47130" then pa_gb=3; *경주시;
+if ptmigucd eq "47150" then pa_gb=4; *김천시;
+if ptmigucd eq "47170" then pa_gb=5; *안동시;
+if ptmigucd eq "47190" then pa_gb=6; *구미시;
+if ptmigucd eq "47210" then pa_gb=7; *영주시;
+if ptmigucd eq "47230" then pa_gb=8; *영천시;
+if ptmigucd eq "47250" then pa_gb=9; *상주시;
+if ptmigucd eq "47280" then pa_gb=10; *문경시;
+if ptmigucd eq "47290" then pa_gb=11; *경산시;
+if ptmigucd eq "47720" then pa_gb=12; *군위군;
+if ptmigucd eq "47730" then pa_gb=13; *의성군;
+if ptmigucd eq "47750" then pa_gb=14; *청송군;
+if ptmigucd eq "47760" then pa_gb=15; *영양군;
+if ptmigucd eq "47770" then pa_gb=16; *영덕군;
+if ptmigucd eq "47820" then pa_gb=17; *청도군;
+if ptmigucd eq "47830" then pa_gb=18; *고령군;
+if ptmigucd eq "47840" then pa_gb=19; *성주군;
+if ptmigucd eq "47850" then pa_gb=20; *칠곡군;
+if ptmigucd eq "47900" then pa_gb=21; *예천군;
+if ptmigucd eq "47920" then pa_gb=22; *봉화군;
+if ptmigucd eq "47930" then pa_gb=23; *울진군;
+if ptmigucd eq "47940" then pa_gb=24; *울릉군;
+
+if pa_gb in(1,2) then pa_gb_poh=1; *포항시;
+
+* (환자주소지 기준) 경상북도 6개 진료권;
+if pa_gb in(1,2,16,23,24) then pa_hsa_gb=1;  *포항권;
+else if pa_gb in(3,11,8,17) then pa_hsa_gb=2;  *경주권;
+else if pa_gb in(5,13,14,15) then pa_hsa_gb=3; *안동권;
+else if pa_gb in(6,20,12,4,19,18) then pa_hsa_gb=4; *구미권;
+else if pa_gb in(7,21,22) then pa_hsa_gb=5; *영주권;
+else if pa_gb in(9,10) then pa_hsa_gb=6; *상주권;
+else pa_hsa_gb=.;
+
+* (환자주소지 기준) 응급의료권역;
+if pa_gb in(5,10,22,15,7,21,13,14) then pa_em_gb=1; *경북안동권;
+else if pa_gb in(6,4,20,9) then pa_em_gb=2; *경북구미권;
+else if pa_gb in(1,2,3,16,23,24) then pa_em_gb=3; *경북포항권;
+else if pa_gb in(11,18,12,19,8,17) then pa_em_gb=4; *대구권;
+else pa_em_gb=.;
+
+/*경상북도 시군구별 타지역 유출*/
+if hp_gb=pa_gb then gb_sigu_out=1; else gb_sigu_out=0; *이탈여부_경상북도 시군구;
+if hp_area=pa_area then gb_sido_out=1; else gb_sido_out=0; *이탈여부_경상북도 시도;
+if hp_hsa_gb=pa_hsa_gb then gb_6gr=1; else gb_6gr=0; *이탈여부_경상북도 중진료권;
+if hp_em_gb=pa_em_gb then gb_4gr=1; else gb_4gr=0; *이탈여부_경상북도 응급의료권역;
+
+/* [삭제] 경북 자체 권역/지역센터 특정병원 구분(hp_center/hp_center2), 발병~내원 시간 계산,
+   연령/성별, 응급진료결과/중증도/내원경로/전원사유/사망률/최종치료제공률 등은 이번 3가지
+   목표 분석(질환별 유출, 대구 소재 병원 유출, 대구 특정병원 유출)에 쓰이지 않아 전부 제외함 */
+
+/*대구광역시, 대구 상급종합병원 정의*/
+
+*대구 시군구 정의(응급의료기관 기준);
+if ptmiemar='27110' then daegu=1; *중구, 경북대학교병원;
+if ptmiemar='27140' then daegu=2; *동구, 대구파티마병원;
+if ptmiemar='27170' then daegu=3; *서구;
+if ptmiemar='27200' then daegu=4; *남구, 영남대학교병원, 가톨릭대학교병원;
+if ptmiemar='27230' then daegu=5; *북구 칠곡경북대학교병원;
+if ptmiemar='27260' then daegu=6; *수성구;
+if ptmiemar='27290' then daegu=7; *달서구, 계명대학교 동산병원;
+if ptmiemar='27710' then daegu=8; *달성군;
+
+*대구광역시 권역 및 지역응급의료센터(상급종합병원급, 파티마제외);
+if h_type in(1,2) then do;
+if daegu in(1,4,5,7) then daegu_top=1;
+else daegu_top=0; end;
+
+* 대구, 각 응급의료기관별 정의;
+if h_type=1 and daegu=1 then gb_hp=1; else gb_hp=0; *경북대학교병원;
+if h_type=1 and daegu=4 then gb_hp_yu=1; else gb_hp_yu=0; *영남대학교병원;
+if h_type=2 and daegu=4 then gb_hp_ga=1; else gb_hp_ga=0; *가톨릭;
+if h_type=2 and daegu=5 then gb_hp_ch=1; else gb_hp_ch=0; *칠곡;
+if h_type=2 and daegu=7 then gb_hp_gae=1; else gb_hp_gae=0; *계명대;
+if h_type=2 and daegu=2 then gb_hp_pati=1; else gb_hp_pati=0; *대구파티마;
+
+* 파티마 포함 응급의료기관(종합병원급 이상);
+if gb_hp=1 or gb_hp_yu=1 or gb_hp_ga=1 or gb_hp_ch=1 or gb_hp_gae=1 or gb_hp_pati=1 then ttop_dg=1;
+else ttop_dg=0;
+
+* 경북 중증환자 중, 대구병원으로 유출(전체);
+if pa_area=15 and emergency_dis=1 then do;
+if hp_area=3 then gb_dg_go=1;
+else gb_dg_go=0; end;
+
+* 경북 중증환자 중, 대구병원으로 유출(종합병원급 이상);
+if pa_area=15 and emergency_dis=1 then do;
+if ttop_dg=1 then gb_dg_topgo=1;
+else gb_dg_topgo=0; end;
+
+if pa_area in(1:2) or pa_area in(4:17) then daegu_ox=1; *대구사람x;
+else if pa_area=3 then daegu_ox=0; *대구사람;
+else daegu_ox=.;
+
+run;
+
+
+/**********************************************************************
+  5단계: 최종 변수 정리 (drop / label) + 경북 데이터셋 추출
+  - [수정3] pa_area/hp_area 추출은 범위 삭제 대신 WHERE 사용 (결측 잔존 방지)
+  - 목표 분석 3가지에 쓰이지 않는 원자료 원본 컬럼(연령/성별/내원경로/일시/최종치료
+    필요·제공사례 등)은 전부 drop하여 용량을 최대한 줄임
+**********************************************************************/
+data save.PTM2022_5;
+set save.PTM2022_4;
+
+drop
+ptmiindt ptmiintm ptmibrtd ptmisexx ptmiiukd ptmiakdt ptmiaktm ptmidgkd ptmiarcf ptmiarcs
+ptmiinrt ptmiinmn ptmimnsy ptmimssr ptmisym2 ptmisys2 ptmisym3 ptmisys3 ptmiemsy ptmiresp
+ptmikts1 ptmiktdt ptmikttm ptmikjob ptmikts2 ptmiarea ptmimdcd ptmisdcd ptmiemrt ptmihsrt
+ptmidept ptmiotdt ptmiottm ptmihsdt ptmihstm ptmidcrt ptmidcdt ptmidctm ptmiintp ptmidctp
+final_need2 final_prv2;
+
+label
+year="연도(2022 고정)"
+ptmiidno="행 기반 합성 매칭키(원자료에 실제 랜덤매칭키 없음)"
+ptmiemar="응급의료기관지역(시군구코드)"
+ptmiemcl="응급의료기관종별"
+ptmiemnm="응급의료기관 식별코드(익명화, 실제 기관명 아님)"
+ptmigucd="환자주소지(시군구코드)"
+
+h_type="(재분류)응급의료기관종별"
+hp_area="(기관기준)시도"
+hp_gb="(기관기준)시군구"
+hp_gb_poh='(응급의료기관 기준)포항시'
+hp_hsa_gb="(기관기준)중진료권"
+hp_em_gb="(기관기준)응급의료권역"
+
+pa_area="(환자기준)시도"
+pa_gb="(환자기준)시군구"
+pa_gb_poh='(환자거주지 기준)포항시'
+pa_hsa_gb="(환자기준)중진료권"
+pa_em_gb="(환자기준)응급의료권역"
+
+gb_sigu_out="(1=잔류,0=유출)시군구"
+gb_sido_out="(1=잔류,0=유출)시도"
+gb_6gr="(1=잔류,0=유출)중진료권"
+gb_4gr="(1=잔류,0=유출)응급의료권역"
+
+emergency_dis="중증응급환자(28대 질환 중 하나라도 해당)"
+
+daegu='대구시군구정의(응급의료기관 기준)'
+daegu_top='대구상급종합병원'
+ttop_dg='(파티마포함)대구응급의료기관'
+gb_hp='경북대학교병원'
+gb_hp_yu='영남대학교병원'
+gb_hp_ga='대구가톨릭대학교병원'
+gb_hp_ch='칠곡경북대학교병원'
+gb_hp_gae='계명대학교 동산병원'
+gb_hp_pati='대구파티마병원'
+
+daegu_ox='대구사람유무'
+gb_dg_go='(전체)경북 중증환자_대구병원 유출'
+gb_dg_topgo='(종합병원급이상)경북 중증환자_대구병원 유출';
+
+run;
+
+/* [주의] 0단계에서 환자 거주지(PTMIGUCD) 기준으로만 경북을 추출했으므로 save.PTM2022_5는
+   이미 전부 pa_area=15 이다. 따라서 아래 save.pa_area는 save.PTM2022_5와 사실상 동일하고,
+   save.hp_area(hp_area=15)는 "경북 거주자이면서 경북 병원 이용"만 잡히는 부분집합이며
+   경북 소재 응급의료기관의 전체 이용 현황과는 다르다(타 시도 거주자의 경북 병원 이용 제외).
+   경북 소재 병원 전체 이용 현황이 필요하면 0단계 조건에 PTMIEMAR 기준을 추가할 것. */
+data save.pa_area; set save.PTM2022_5; where pa_area=15; run;
+data save.hp_area; set save.PTM2022_5; where hp_area=15; run;
+
+
+/**********************************************************************
+  6단계: 결과표 산출
+   1) 질환별 유출 현황(%) + 전체(중복제외) 유출율
+   2) 중증응급환자 전체 / 주산기질환(12) / 조산아·저체중아(13)
+      - 대구광역시 유출, 대구 6개 특정병원 유출(합산 및 병원별) 비율
+  - 입력: save.pa_area (환자 거주지=경북. 0단계 필터로 save.PTM2022_5와 사실상 동일)
+  - "유출" = 응급의료기관 소재 시도(hp_area) ≠ 환자 거주지 시도(pa_area), 즉 gb_sido_out=0
+  - out_pct(전체 환자 대비 유출율)와 별도로, daegu/top6/병원별은
+      "_of_total" = 전체 환자 대비 비율
+      "_of_out"   = "유출" 환자만 대비 비율(유출 가운데 대구/대구6병원 비중) - [확정 지표]
+**********************************************************************/
+
+proc format;
+value dfmt
+1='심근경색증' 2='허혈성뇌졸중' 3='뇌실질출혈' 4='거미막하출혈' 5='중증외상'
+6='대동맥박리' 7='담낭담관질환' 8='외과계질환(장중첩/폐색 별도)' 9='위장관출혈/이물질'
+10='기관지출혈/이물질' 11='중독(CO포함)' 12='주산기질환' 13='조산아/저체중아'
+14='중증화상' 15='간질지속상태' 16='뇌수막염' 17='패혈증' 18='당뇨병성혼수'
+19='폐색전/DVT' 20='부정맥' 21='ARDS/폐부종' 22='DIC' 23='장중첩/폐색'
+24='사지절단' 25='급성신부전' 26='안과적응급' 27='소생술후상태' 28='비뇨기과응급';
+run;
+
+/* 1) 질환별 유출 현황(%) + 전체(중증응급환자, 중복제외) 유출율
+   - "전체" 행은 emergency_dis=1(28대 질환 중 하나라도 해당하는 중증응급환자)만 집계.
+     save.pa_area는 이미 emergency_dis=1로만 구성돼 있지만, 다른 데이터셋에 적용해도
+     안전하도록 조건을 명시적으로 검사함 */
+data save.dis_outflow;
+set save.pa_area end=eof;
+array ds{28} emergency_dis_1-emergency_dis_28;
+array tot{28} _temporary_ (28*0);
+array outn{28} _temporary_ (28*0);
+retain tot_all outn_all 0;
+
+do i=1 to 28;
+  if ds{i}=1 then do;
+    tot{i}+1;
+    if gb_sido_out=0 then outn{i}+1;
+  end;
+end;
+if emergency_dis=1 then do;
+  tot_all+1;
+  if gb_sido_out=0 then outn_all+1;
+end;
+
+if eof then do;
+  disease_no=0; disease='전체(중증응급환자, 중복제외)';
+  total_n=tot_all; out_n=outn_all;
+  out_pct=ifn(total_n>0, round(out_n/total_n*100,0.1), .);
+  output;
+  do i=1 to 28;
+    disease_no=i;
+    disease=put(i,dfmt.);
+    total_n=tot{i};
+    out_n=outn{i};
+    out_pct=ifn(total_n>0, round(out_n/total_n*100,0.1), .);
+    output;
+  end;
+end;
+keep disease_no disease total_n out_n out_pct;
+run;
+
+proc print data=save.dis_outflow noobs label;
+var disease_no disease total_n out_n out_pct;
+label disease_no='번호' disease='질환명' total_n='전체 환자수' out_n='유출 건수(경북 밖 이용)' out_pct='유출율(%)';
+run;
+
+/* 2) 중증응급환자 전체(28대 질환 통합, 항상 emergency_dis=1) / 주산기질환(12) / 조산아·저체중아(13)
+   - 대구 소재 병원 유출, 대구 6개 특정병원 유출(합산 및 병원별) 비율
+   [확정 지표] daegu_pct_of_out, top6_pct_of_out, 병원별 *_pct_of_out
+   (유출 건수 대비 = 분모: gb_sido_out=0 건수) */
+data save.perinatal_daegu_2022;
+set save.pa_area end=eof;
+array flag{0:2} _temporary_;
+array tot{0:2}   _temporary_ (3*0);
+array outn{0:2}  _temporary_ (3*0);
+array dgn{0:2}   _temporary_ (3*0);
+array topn{0:2}  _temporary_ (3*0);
+array hp1n{0:2}  _temporary_ (3*0);  *경북대학교병원;
+array hp2n{0:2}  _temporary_ (3*0);  *영남대학교병원;
+array hp3n{0:2}  _temporary_ (3*0);  *대구가톨릭대학교병원;
+array hp4n{0:2}  _temporary_ (3*0);  *칠곡경북대학교병원;
+array hp5n{0:2}  _temporary_ (3*0);  *계명대학교 동산병원;
+array hp6n{0:2}  _temporary_ (3*0);  *대구파티마병원;
+
+flag{0}=(emergency_dis=1);   *0=전체(중증응급환자);
+flag{1}=(emergency_dis_12=1); *1=주산기질환;
+flag{2}=(emergency_dis_13=1); *2=조산아/저체중아;
+
+do g=0 to 2;
+  if flag{g}=1 then do;
+    tot{g}+1;
+    if gb_sido_out=0 then outn{g}+1;
+    if hp_area=3 then dgn{g}+1;
+    if ttop_dg=1 then topn{g}+1;
+    if gb_hp=1      then hp1n{g}+1;
+    if gb_hp_yu=1   then hp2n{g}+1;
+    if gb_hp_ga=1   then hp3n{g}+1;
+    if gb_hp_ch=1   then hp4n{g}+1;
+    if gb_hp_gae=1  then hp5n{g}+1;
+    if gb_hp_pati=1 then hp6n{g}+1;
+  end;
+end;
+
+if eof then do g=0 to 2;
+  group = choosec(g+1,'전체(중증응급환자)','주산기질환','조산아/저체중아');
+  total_n=tot{g};      out_n=outn{g};
+  daegu_n=dgn{g};      top6_n=topn{g};
+  gb_hp_n=hp1n{g};     gb_hp_yu_n=hp2n{g};    gb_hp_ga_n=hp3n{g};
+  gb_hp_ch_n=hp4n{g};  gb_hp_gae_n=hp5n{g};   gb_hp_pati_n=hp6n{g};
+
+  out_pct            = ifn(total_n>0, round(out_n/total_n*100,0.1), .);
+  daegu_pct_of_total = ifn(total_n>0, round(daegu_n/total_n*100,0.1), .);
+  daegu_pct_of_out   = ifn(out_n>0,   round(daegu_n/out_n*100,0.1),   .);
+  top6_pct_of_total  = ifn(total_n>0, round(top6_n/total_n*100,0.1), .);
+  top6_pct_of_out    = ifn(out_n>0,   round(top6_n/out_n*100,0.1),   .);
+  gb_hp_pct_of_out      = ifn(out_n>0, round(gb_hp_n/out_n*100,0.1),      .);
+  gb_hp_yu_pct_of_out   = ifn(out_n>0, round(gb_hp_yu_n/out_n*100,0.1),   .);
+  gb_hp_ga_pct_of_out   = ifn(out_n>0, round(gb_hp_ga_n/out_n*100,0.1),   .);
+  gb_hp_ch_pct_of_out   = ifn(out_n>0, round(gb_hp_ch_n/out_n*100,0.1),   .);
+  gb_hp_gae_pct_of_out  = ifn(out_n>0, round(gb_hp_gae_n/out_n*100,0.1),  .);
+  gb_hp_pati_pct_of_out = ifn(out_n>0, round(gb_hp_pati_n/out_n*100,0.1), .);
+  output;
+end;
+keep group total_n out_n out_pct
+     daegu_n daegu_pct_of_total daegu_pct_of_out
+     top6_n top6_pct_of_total top6_pct_of_out
+     gb_hp_n gb_hp_yu_n gb_hp_ga_n gb_hp_ch_n gb_hp_gae_n gb_hp_pati_n
+     gb_hp_pct_of_out gb_hp_yu_pct_of_out gb_hp_ga_pct_of_out
+     gb_hp_ch_pct_of_out gb_hp_gae_pct_of_out gb_hp_pati_pct_of_out;
+run;
+
+proc print data=save.perinatal_daegu_2022 noobs label;
+label group='구분' total_n='전체 환자수' out_n='유출 건수' out_pct='유출율(%, 전체대비)'
+      daegu_n='대구 소재병원 이용 건수' daegu_pct_of_total='대구 유출율(%, 전체대비)'
+      daegu_pct_of_out='대구 유출율(%, 유출대비) *확정 지표*'
+      top6_n='대구 6개 특정병원 이용 건수(합산)' top6_pct_of_total='대구6병원 유출율(%, 전체대비)'
+      top6_pct_of_out='대구6병원 유출율(%, 유출대비) *확정 지표*'
+      gb_hp_n='경북대학교병원 건수' gb_hp_yu_n='영남대학교병원 건수' gb_hp_ga_n='대구가톨릭대학교병원 건수'
+      gb_hp_ch_n='칠곡경북대학교병원 건수' gb_hp_gae_n='계명대학교 동산병원 건수' gb_hp_pati_n='대구파티마병원 건수'
+      gb_hp_pct_of_out='경북대 유출율(%,유출대비)' gb_hp_yu_pct_of_out='영남대 유출율(%,유출대비)'
+      gb_hp_ga_pct_of_out='가톨릭대 유출율(%,유출대비)' gb_hp_ch_pct_of_out='칠곡경북대 유출율(%,유출대비)'
+      gb_hp_gae_pct_of_out='계명대동산 유출율(%,유출대비)' gb_hp_pati_pct_of_out='대구파티마 유출율(%,유출대비)';
+run;
