@@ -253,30 +253,20 @@ run;
        퇴실 또는 퇴원 진단코드(구분 1,2) 중 하나라도 해당하면 중증응급
  **********************************************************/
 
-/* &n번 질환, 진단코드 앞 &len자리가 &codes(공백 구분) 중 하나이면 td(퇴실)/cd(퇴원)=1
-   [수정] findw()로 매칭했더니 코드가 2개 이상인 질환(뇌졸중/뇌실질출혈/대동맥박리 등)이
-   원자료에 해당 코드가 다수 존재함에도(진단 필드 직접 카운트로 확인) 전부 0으로 나오는
-   현상이 있어(findw 인자 조합 문제로 추정, 원인 특정 못함), 2단계 ICISS에서 이미 검증된
-   방식과 동일하게 findw 대신 "codes"를 'I63','I64' 형태 quoted IN-list로 변환해 SAS
-   내장 in() 연산자로 직접 비교하도록 변경함. */
+/* &n번 질환, 진단코드 앞 &len자리가 &codes 중 하나이면 td(퇴실)/cd(퇴원)=1
+   [수정2] findw() 방식, 그리고 그 다음 시도한 매크로 내부 동적 quoted-list 조립 방식
+   둘 다 실제로는 매칭이 전혀 안 되는 문제가 있었음(원인 특정 못함).
+   -> 2단계 ICISS의 trauma_codes와 완전히 동일한 방식으로 되돌림: codes는 처음부터
+   'I63','I64' 형태로 완전히 하드코드해서 넘기고(각 호출부에서 %str()로 감싸 콤마가
+   매크로 인자 구분자로 오인되지 않게 함), in() 연산자로 직접 비교. 동적 조립 없음. */
 %macro dis(n=, len=, codes=);
-  %local i k j w qcodes;
-  %let qcodes=;
-  %let j=1;
-  %let w=%scan(&codes,&j,%str( ));
-  %do %while(%length(&w));
-    %if &j>1 %then %let qcodes=&qcodes,;
-    %let qcodes=&qcodes.'&w.';
-    %let j=%eval(&j+1);
-    %let w=%scan(&codes,&j,%str( ));
-  %end;
-
+  %local i k;
   %do i=1 %to 20;
     %let k=%sysfunc(putn(&i,z2.));
     if strip(vvalue(DGOTDGGB&k)) in ('1','2') and not missing(DGOTDIAG&k)
-       and substr(DGOTDIAG&k,1,&len) in (&qcodes) then emergency_dis_td_&n=1;
+       and substr(DGOTDIAG&k,1,&len) in (&codes) then emergency_dis_td_&n=1;
     if strip(vvalue(DGDCDGGB&k)) in ('1','2') and not missing(DGDCDIAG&k)
-       and substr(DGDCDIAG&k,1,&len) in (&qcodes) then emergency_dis_cd_&n=1;
+       and substr(DGDCDIAG&k,1,&len) in (&codes) then emergency_dis_cd_&n=1;
   %end;
 %mend;
 
@@ -318,67 +308,67 @@ array cd {28} emergency_dis_cd_1-emergency_dis_cd_28;
 array ds {28} emergency_dis_1-emergency_dis_28;
 
 *1 심근경색증(MI);
-%dis(n=1,  len=3, codes=I21)
+%dis(n=1,  len=3, codes=%str('I21'))
 *2 허혈성뇌졸중(IS);
-%dis(n=2,  len=3, codes=I63 I64)
+%dis(n=2,  len=3, codes=%str('I63','I64'))
 *3 뇌실질출혈(CPD);
-%dis(n=3,  len=3, codes=I61 I62)
+%dis(n=3,  len=3, codes=%str('I61','I62'))
 *4 거미막하출혈(SH);
-%dis(n=4,  len=3, codes=I60)
+%dis(n=4,  len=3, codes=%str('I60'))
 *5 중증외상(MT): 2단계 ICISS 결과;
 if iciss_09_ot=1 then emergency_dis_td_5=1;
 if iciss_09_dc=1 then emergency_dis_cd_5=1;
 *6 대동맥박리(AD);
-%dis(n=6,  len=4, codes=I710 I711 I713 I715 I718)
+%dis(n=6,  len=4, codes=%str('I710','I711','I713','I715','I718'))
 *7 담낭담관질환;
-%dis(n=7,  len=4, codes=K800 K801 K803 K804 K805 K819 K830 K831)
+%dis(n=7,  len=4, codes=%str('K800','K801','K803','K804','K805','K819','K830','K831'))
 *8 외과계질환(장중첩/폐색 별도);
-%dis(n=8,  len=4, codes=K352 K353 K631 K661)
-%dis(n=8,  len=3, codes=K65)
+%dis(n=8,  len=4, codes=%str('K352','K353','K631','K661'))
+%dis(n=8,  len=3, codes=%str('K65'))
 *9 위장관출혈/이물질;
-%dis(n=9,  len=4, codes=I850 I864 I983 K226 K250 K252 K254 K256 K260 K262 K264 K266 K920 K921 K922 T181)
+%dis(n=9,  len=4, codes=%str('I850','I864','I983','K226','K250','K252','K254','K256','K260','K262','K264','K266','K920','K921','K922','T181'))
 *10 기관지출혈/이물질;
-%dis(n=10, len=4, codes=R042 R048 R049 T174 T175 T178 T179)
+%dis(n=10, len=4, codes=%str('R042','R048','R049','T174','T175','T178','T179'))
 *11 중독(CO포함);
-%dis(n=11, len=3, codes=T36 T37 T38 T39 T40 T41 T42 T43 T44 T45 T46 T47 T48 T49 T50 T51 T52 T53 T54 T55 T56 T57 T58 T59 T60 T61 T62 T63 T64 T65)
+%dis(n=11, len=3, codes=%str('T36','T37','T38','T39','T40','T41','T42','T43','T44','T45','T46','T47','T48','T49','T50','T51','T52','T53','T54','T55','T56','T57','T58','T59','T60','T61','T62','T63','T64','T65'))
 *12 주산기질환;
-%dis(n=12, len=3, codes=O00 O14 O15 O45 O60 O72 O80 O82)
-%dis(n=12, len=4, codes=O420 O421 O422 O429 O622)
+%dis(n=12, len=3, codes=%str('O00','O14','O15','O45','O60','O72','O80','O82'))
+%dis(n=12, len=4, codes=%str('O420','O421','O422','O429','O622'))
 *13 조산아/저체중아;
-%dis(n=13, len=3, codes=P07 P22 P24 P36 P52 P59)
+%dis(n=13, len=3, codes=%str('P07','P22','P24','P36','P52','P59'))
 *14 중증화상;
-%dis(n=14, len=4, codes=T203 T207 T213 T217 T313 T314 T315 T316 T317 T318 T319)
+%dis(n=14, len=4, codes=%str('T203','T207','T213','T217','T313','T314','T315','T316','T317','T318','T319'))
 *15 간질지속상태;
-%dis(n=15, len=3, codes=G41)
+%dis(n=15, len=3, codes=%str('G41'))
 *16 뇌수막염;
-%dis(n=16, len=3, codes=A83 A84 A85 A86 A87 G00 G01 G02 G03 G04 G05 G06 G07)
+%dis(n=16, len=3, codes=%str('A83','A84','A85','A86','A87','G00','G01','G02','G03','G04','G05','G06','G07'))
 *17 패혈증;
-%dis(n=17, len=4, codes=A021 A227 A241 A267 A400 A401 A402 A403 A404 A405 A406 A407 A408 A409 A410 A411 A412 A413 A414 A419 A427 B007 B377)
+%dis(n=17, len=4, codes=%str('A021','A227','A241','A267','A400','A401','A402','A403','A404','A405','A406','A407','A408','A409','A410','A411','A412','A413','A414','A419','A427','B007','B377'))
 *18 당뇨병성 혼수;
-%dis(n=18, len=4, codes=E100 E101 E110 E111 E130 E131 E140 E141)
+%dis(n=18, len=4, codes=%str('E100','E101','E110','E111','E130','E131','E140','E141'))
 *19 폐색전/DVT;
-%dis(n=19, len=4, codes=I260 I269 I802)
+%dis(n=19, len=4, codes=%str('I260','I269','I802'))
 *20 부정맥;
-%dis(n=20, len=3, codes=I45 I48)
-%dis(n=20, len=4, codes=I441 I442 I472 I490 I495 I498 I499)
+%dis(n=20, len=3, codes=%str('I45','I48'))
+%dis(n=20, len=4, codes=%str('I441','I442','I472','I490','I495','I498','I499'))
 *21 ARDS/폐부종;
-%dis(n=21, len=3, codes=J80 J81 J85 J86 J96)
+%dis(n=21, len=3, codes=%str('J80','J81','J85','J86','J96'))
 *22 DIC;
-%dis(n=22, len=3, codes=D65)
+%dis(n=22, len=3, codes=%str('D65'))
 *23 장중첩/폐색;
-%dis(n=23, len=4, codes=K561 K562 K563 K565 K566)
+%dis(n=23, len=4, codes=%str('K561','K562','K563','K565','K566'))
 *24 사지절단;
-%dis(n=24, len=3, codes=S48 S58 S68 S78 S88 T05)
-%dis(n=24, len=4, codes=S980 S981 S982 S983 S984 T060 T061 T062 T063 T064 T065 T066 T067 T068 T116 T136)
+%dis(n=24, len=3, codes=%str('S48','S58','S68','S78','S88','T05'))
+%dis(n=24, len=4, codes=%str('S980','S981','S982','S983','S984','T060','T061','T062','T063','T064','T065','T066','T067','T068','T116','T136'))
 *25 급성신부전;
-%dis(n=25, len=3, codes=N17)
+%dis(n=25, len=3, codes=%str('N17'))
 *26 안과적 응급;
-%dis(n=26, len=3, codes=H33 H34 H40 H42)
+%dis(n=26, len=3, codes=%str('H33','H34','H40','H42'))
 *27 소생술 후 상태;
-%dis(n=27, len=3, codes=I46)
+%dis(n=27, len=3, codes=%str('I46'))
 *28 비뇨기과 응급;
-%dis(n=28, len=3, codes=N44)
-%dis(n=28, len=4, codes=N450 N459)
+%dis(n=28, len=3, codes=%str('N44'))
+%dis(n=28, len=4, codes=%str('N450','N459'))
 
 do j=1 to 28;
   if cd{j}=1 or td{j}=1 then ds{j}=1;   /* 질환별: 퇴실 또는 퇴원 */
