@@ -699,3 +699,96 @@ run;
    경북 소재 병원 전체 이용 현황이 필요하면 0단계 조건에 PTMIEMAR 기준을 추가할 것. */
 data save.pa_area; set save.PTM2022_5; where pa_area=15; run;
 data save.hp_area; set save.PTM2022_5; where hp_area=15; run;
+
+
+/**********************************************************************
+  6단계: 결과표 산출
+   1) 질환별 유출 현황(%)
+   2) 주산기질환(12)/조산아·저체중아(13) - 대구광역시 유출 비율, 대구 6개 특정병원 유출 비율
+  - 입력: save.pa_area (환자 거주지=경북. 0단계 필터로 save.PTM2022_5와 사실상 동일)
+  - "유출" = 응급의료기관 소재 시도(hp_area) ≠ 환자 거주지 시도(pa_area), 즉 gb_sido_out=0
+  - out_pct(전체 환자 대비 유출율)와 별도로, daegu/top6는
+      "_of_total" = 그 질환 전체 환자 대비 비율
+      "_of_out"   = 그 질환의 "유출" 환자만 대비 비율(유출 가운데 대구/대구6병원 비중)
+    두 가지를 같이 냈으니 PDF 표의 정의와 맞는 쪽으로 골라 쓸 것
+**********************************************************************/
+
+proc format;
+value dfmt
+1='심근경색증' 2='허혈성뇌졸중' 3='뇌실질출혈' 4='거미막하출혈' 5='중증외상'
+6='대동맥박리' 7='담낭담관질환' 8='외과계질환(장중첩/폐색 별도)' 9='위장관출혈/이물질'
+10='기관지출혈/이물질' 11='중독(CO포함)' 12='주산기질환' 13='조산아/저체중아'
+14='중증화상' 15='간질지속상태' 16='뇌수막염' 17='패혈증' 18='당뇨병성혼수'
+19='폐색전/DVT' 20='부정맥' 21='ARDS/폐부종' 22='DIC' 23='장중첩/폐색'
+24='사지절단' 25='급성신부전' 26='안과적응급' 27='소생술후상태' 28='비뇨기과응급';
+run;
+
+/* 1) 질환별 유출 현황(%) */
+data work.dis_outflow;
+set save.pa_area end=eof;
+array ds{28} emergency_dis_1-emergency_dis_28;
+array tot{28} _temporary_ (28*0);
+array outn{28} _temporary_ (28*0);
+do i=1 to 28;
+  if ds{i}=1 then do;
+    tot{i}+1;
+    if gb_sido_out=0 then outn{i}+1;
+  end;
+end;
+if eof then do i=1 to 28;
+  disease_no=i;
+  disease=put(i,dfmt.);
+  total_n=tot{i};
+  out_n=outn{i};
+  out_pct=ifn(total_n>0, round(out_n/total_n*100,0.1), .);
+  output;
+end;
+keep disease_no disease total_n out_n out_pct;
+run;
+
+proc print data=work.dis_outflow noobs label;
+var disease_no disease total_n out_n out_pct;
+label disease_no='번호' disease='질환명' total_n='전체 환자수' out_n='유출 건수(경북 밖 이용)' out_pct='유출율(%)';
+run;
+
+/* 2) 주산기질환(12)/조산아·저체중아(13): 대구 유출, 대구 6개 특정병원 유출 비율 */
+data work.perinatal_daegu;
+set save.pa_area end=eof;
+array pd{2} emergency_dis_12 emergency_dis_13;
+array tot{2} _temporary_ (2*0);
+array outn{2} _temporary_ (2*0);
+array dgn{2} _temporary_ (2*0);
+array topn{2} _temporary_ (2*0);
+do i=1 to 2;
+  if pd{i}=1 then do;
+    tot{i}+1;
+    if gb_sido_out=0 then outn{i}+1;
+    if hp_area=3 then dgn{i}+1;    *대구광역시 소재 병원;
+    if ttop_dg=1 then topn{i}+1;   *대구 6개 특정병원(경북대/영남대/가톨릭대/칠곡경북대/계명대동산/대구파티마);
+  end;
+end;
+if eof then do i=1 to 2;
+  disease_no=(i=1)*12+(i=2)*13;
+  disease=put(disease_no,dfmt.);
+  total_n=tot{i};
+  out_n=outn{i};
+  daegu_n=dgn{i};
+  top6_n=topn{i};
+  out_pct            = ifn(total_n>0, round(out_n/total_n*100,0.1), .);
+  daegu_pct_of_total = ifn(total_n>0, round(daegu_n/total_n*100,0.1), .);
+  daegu_pct_of_out   = ifn(out_n>0,   round(daegu_n/out_n*100,0.1),   .);
+  top6_pct_of_total  = ifn(total_n>0, round(top6_n/total_n*100,0.1), .);
+  top6_pct_of_out    = ifn(out_n>0,   round(top6_n/out_n*100,0.1),   .);
+  output;
+end;
+keep disease_no disease total_n out_n daegu_n top6_n out_pct
+     daegu_pct_of_total daegu_pct_of_out top6_pct_of_total top6_pct_of_out;
+run;
+
+proc print data=work.perinatal_daegu noobs label;
+label disease_no='번호' disease='질환명' total_n='전체 환자수' out_n='유출 건수'
+      daegu_n='대구 소재병원 이용 건수' top6_n='대구 6개 특정병원 이용 건수'
+      out_pct='유출율(%, 전체대비)'
+      daegu_pct_of_total='대구 유출율(%, 전체대비)' daegu_pct_of_out='대구 유출율(%, 유출대비)'
+      top6_pct_of_total='대구6병원 유출율(%, 전체대비)' top6_pct_of_out='대구6병원 유출율(%, 유출대비)';
+run;
