@@ -707,14 +707,14 @@ data save.hp_area; set save.PTM2022_5; where hp_area=15; run;
 
 /**********************************************************************
   6단계: 결과표 산출
-   1) 질환별 유출 현황(%)
-   2) 주산기질환(12)/조산아·저체중아(13) - 대구광역시 유출 비율, 대구 6개 특정병원 유출 비율
+   1) 질환별 유출 현황(%) + 전체(중복제외) 유출율
+   2) 중증응급환자 전체 / 주산기질환(12) / 조산아·저체중아(13)
+      - 대구광역시 유출, 대구 6개 특정병원 유출(합산 및 병원별) 비율
   - 입력: save.pa_area (환자 거주지=경북. 0단계 필터로 save.PTM2022_5와 사실상 동일)
   - "유출" = 응급의료기관 소재 시도(hp_area) ≠ 환자 거주지 시도(pa_area), 즉 gb_sido_out=0
-  - out_pct(전체 환자 대비 유출율)와 별도로, daegu/top6는
-      "_of_total" = 그 질환 전체 환자 대비 비율
-      "_of_out"   = 그 질환의 "유출" 환자만 대비 비율(유출 가운데 대구/대구6병원 비중)
-    두 가지를 같이 냈으니 PDF 표의 정의와 맞는 쪽으로 골라 쓸 것
+  - out_pct(전체 환자 대비 유출율)와 별도로, daegu/top6/병원별은
+      "_of_total" = 전체 환자 대비 비율
+      "_of_out"   = "유출" 환자만 대비 비율(유출 가운데 대구/대구6병원 비중) - [확정 지표]
 **********************************************************************/
 
 proc format;
@@ -727,111 +727,121 @@ value dfmt
 24='사지절단' 25='급성신부전' 26='안과적응급' 27='소생술후상태' 28='비뇨기과응급';
 run;
 
-/* 1) 질환별 유출 현황(%) */
-data work.dis_outflow;
+/* 1) 질환별 유출 현황(%) + 전체(중복제외) 유출율
+   - save.pa_area 자체가 이미 "emergency_dis=1인 유니크 환자" 단위이므로,
+     전체(중복제외) 행은 이 데이터셋 전체 건수를 그대로 분모로 사용 */
+data save.dis_outflow;
 set save.pa_area end=eof;
 array ds{28} emergency_dis_1-emergency_dis_28;
 array tot{28} _temporary_ (28*0);
 array outn{28} _temporary_ (28*0);
+retain tot_all outn_all 0;
+
 do i=1 to 28;
   if ds{i}=1 then do;
     tot{i}+1;
     if gb_sido_out=0 then outn{i}+1;
   end;
 end;
-if eof then do i=1 to 28;
-  disease_no=i;
-  disease=put(i,dfmt.);
-  total_n=tot{i};
-  out_n=outn{i};
+tot_all+1;
+if gb_sido_out=0 then outn_all+1;
+
+if eof then do;
+  disease_no=0; disease='전체(중복제외)';
+  total_n=tot_all; out_n=outn_all;
   out_pct=ifn(total_n>0, round(out_n/total_n*100,0.1), .);
   output;
+  do i=1 to 28;
+    disease_no=i;
+    disease=put(i,dfmt.);
+    total_n=tot{i};
+    out_n=outn{i};
+    out_pct=ifn(total_n>0, round(out_n/total_n*100,0.1), .);
+    output;
+  end;
 end;
 keep disease_no disease total_n out_n out_pct;
 run;
 
-proc print data=work.dis_outflow noobs label;
+proc print data=save.dis_outflow noobs label;
 var disease_no disease total_n out_n out_pct;
 label disease_no='번호' disease='질환명' total_n='전체 환자수' out_n='유출 건수(경북 밖 이용)' out_pct='유출율(%)';
 run;
 
-/* 2) 주산기질환(12)/조산아·저체중아(13): 대구 유출, 대구 6개 특정병원 유출 비율 */
-data work.perinatal_daegu;
+/* 2) 중증응급환자 전체(28대 질환 통합, 항상 emergency_dis=1) / 주산기질환(12) / 조산아·저체중아(13)
+   - 대구 소재 병원 유출, 대구 6개 특정병원 유출(합산 및 병원별) 비율
+   [확정 지표] daegu_pct_of_out, top6_pct_of_out, 병원별 *_pct_of_out
+   (유출 건수 대비 = 분모: gb_sido_out=0 건수) */
+data save.perinatal_daegu_2022;
 set save.pa_area end=eof;
-array pd{2} emergency_dis_12 emergency_dis_13;
-array tot{2} _temporary_ (2*0);
-array outn{2} _temporary_ (2*0);
-array dgn{2} _temporary_ (2*0);
-array topn{2} _temporary_ (2*0);
-do i=1 to 2;
-  if pd{i}=1 then do;
-    tot{i}+1;
-    if gb_sido_out=0 then outn{i}+1;
-    if hp_area=3 then dgn{i}+1;    *대구광역시 소재 병원;
-    if ttop_dg=1 then topn{i}+1;   *대구 6개 특정병원(경북대/영남대/가톨릭대/칠곡경북대/계명대동산/대구파티마);
+array flag{0:2} _temporary_;
+array tot{0:2}   _temporary_ (3*0);
+array outn{0:2}  _temporary_ (3*0);
+array dgn{0:2}   _temporary_ (3*0);
+array topn{0:2}  _temporary_ (3*0);
+array hp1n{0:2}  _temporary_ (3*0);  *경북대학교병원;
+array hp2n{0:2}  _temporary_ (3*0);  *영남대학교병원;
+array hp3n{0:2}  _temporary_ (3*0);  *대구가톨릭대학교병원;
+array hp4n{0:2}  _temporary_ (3*0);  *칠곡경북대학교병원;
+array hp5n{0:2}  _temporary_ (3*0);  *계명대학교 동산병원;
+array hp6n{0:2}  _temporary_ (3*0);  *대구파티마병원;
+
+flag{0}=(emergency_dis=1);   *0=전체(중증응급환자);
+flag{1}=(emergency_dis_12=1); *1=주산기질환;
+flag{2}=(emergency_dis_13=1); *2=조산아/저체중아;
+
+do g=0 to 2;
+  if flag{g}=1 then do;
+    tot{g}+1;
+    if gb_sido_out=0 then outn{g}+1;
+    if hp_area=3 then dgn{g}+1;
+    if ttop_dg=1 then topn{g}+1;
+    if gb_hp=1      then hp1n{g}+1;
+    if gb_hp_yu=1   then hp2n{g}+1;
+    if gb_hp_ga=1   then hp3n{g}+1;
+    if gb_hp_ch=1   then hp4n{g}+1;
+    if gb_hp_gae=1  then hp5n{g}+1;
+    if gb_hp_pati=1 then hp6n{g}+1;
   end;
 end;
-if eof then do i=1 to 2;
-  disease_no=(i=1)*12+(i=2)*13;
-  disease=put(disease_no,dfmt.);
-  total_n=tot{i};
-  out_n=outn{i};
-  daegu_n=dgn{i};
-  top6_n=topn{i};
+
+if eof then do g=0 to 2;
+  group = choosec(g+1,'전체(중증응급환자)','주산기질환','조산아/저체중아');
+  total_n=tot{g};      out_n=outn{g};
+  daegu_n=dgn{g};      top6_n=topn{g};
+  gb_hp_n=hp1n{g};     gb_hp_yu_n=hp2n{g};    gb_hp_ga_n=hp3n{g};
+  gb_hp_ch_n=hp4n{g};  gb_hp_gae_n=hp5n{g};   gb_hp_pati_n=hp6n{g};
+
   out_pct            = ifn(total_n>0, round(out_n/total_n*100,0.1), .);
   daegu_pct_of_total = ifn(total_n>0, round(daegu_n/total_n*100,0.1), .);
   daegu_pct_of_out   = ifn(out_n>0,   round(daegu_n/out_n*100,0.1),   .);
   top6_pct_of_total  = ifn(total_n>0, round(top6_n/total_n*100,0.1), .);
   top6_pct_of_out    = ifn(out_n>0,   round(top6_n/out_n*100,0.1),   .);
+  gb_hp_pct_of_out      = ifn(out_n>0, round(gb_hp_n/out_n*100,0.1),      .);
+  gb_hp_yu_pct_of_out   = ifn(out_n>0, round(gb_hp_yu_n/out_n*100,0.1),   .);
+  gb_hp_ga_pct_of_out   = ifn(out_n>0, round(gb_hp_ga_n/out_n*100,0.1),   .);
+  gb_hp_ch_pct_of_out   = ifn(out_n>0, round(gb_hp_ch_n/out_n*100,0.1),   .);
+  gb_hp_gae_pct_of_out  = ifn(out_n>0, round(gb_hp_gae_n/out_n*100,0.1),  .);
+  gb_hp_pati_pct_of_out = ifn(out_n>0, round(gb_hp_pati_n/out_n*100,0.1), .);
   output;
 end;
-keep disease_no disease total_n out_n daegu_n top6_n out_pct
-     daegu_pct_of_total daegu_pct_of_out top6_pct_of_total top6_pct_of_out;
+keep group total_n out_n out_pct
+     daegu_n daegu_pct_of_total daegu_pct_of_out
+     top6_n top6_pct_of_total top6_pct_of_out
+     gb_hp_n gb_hp_yu_n gb_hp_ga_n gb_hp_ch_n gb_hp_gae_n gb_hp_pati_n
+     gb_hp_pct_of_out gb_hp_yu_pct_of_out gb_hp_ga_pct_of_out
+     gb_hp_ch_pct_of_out gb_hp_gae_pct_of_out gb_hp_pati_pct_of_out;
 run;
 
-proc print data=work.perinatal_daegu noobs label;
-label disease_no='번호' disease='질환명' total_n='전체 환자수' out_n='유출 건수'
-      daegu_n='대구 소재병원 이용 건수' top6_n='대구 6개 특정병원 이용 건수'
-      out_pct='유출율(%, 전체대비)'
-      daegu_pct_of_total='대구 유출율(%, 전체대비)' daegu_pct_of_out='대구 유출율(%, 유출대비) *확정 지표*'
-      top6_pct_of_total='대구6병원 유출율(%, 전체대비)' top6_pct_of_out='대구6병원 유출율(%, 유출대비) *확정 지표*';
-run;
-
-/* 3) 중증응급환자 전체(28대 질환 통합) - 유출 건수 대비 대구 종합병원급 이상(6개 병원) 유출률
-   [확정] 분모=유출 건수(gb_sido_out=0), 분자=그 중 대구 종합병원급 이상(ttop_dg=1, =6개 병원)
-   전체 + 6개 진료권(pa_hsa_gb)별로 산출 (PDF의 "권역별 중증응급환자 대구광역시 유출 현황"과 동일 구도) */
-proc format;
-value hsafmt
-1='안동권' 2='경주권' 3='포항권' 4='구미권' 5='영주권' 6='상주권';
-run;
-
-data work.severe_daegu_top;
-set save.pa_area end=eof;
-if emergency_dis=1;
-array tot{0:6} _temporary_ (7*0);   *0=전체, 1~6=진료권;
-array outn{0:6} _temporary_ (7*0);
-array topn{0:6} _temporary_ (7*0);
-tot{0}+1;
-if gb_sido_out=0 then outn{0}+1;
-if gb_dg_topgo=1 then topn{0}+1;
-if 1<=pa_hsa_gb<=6 then do;
-  tot{pa_hsa_gb}+1;
-  if gb_sido_out=0 then outn{pa_hsa_gb}+1;
-  if gb_dg_topgo=1 then topn{pa_hsa_gb}+1;
-end;
-if eof then do g=0 to 6;
-  group = ifc(g=0,'전체(경북)',put(g,hsafmt.));
-  total_n=tot{g};
-  out_n=outn{g};
-  top6_n=topn{g};
-  top6_pct_of_out = ifn(out_n>0, round(top6_n/out_n*100,0.1), .);
-  output;
-end;
-keep group total_n out_n top6_n top6_pct_of_out;
-run;
-
-proc print data=work.severe_daegu_top noobs label;
-label group='구분' total_n='전체 중증응급환자수' out_n='유출 건수'
-      top6_n='대구 종합병원급이상(6개병원) 유출 건수'
-      top6_pct_of_out='유출건수 대비 대구 종합병원급이상 유출률(%)';
+proc print data=save.perinatal_daegu_2022 noobs label;
+label group='구분' total_n='전체 환자수' out_n='유출 건수' out_pct='유출율(%, 전체대비)'
+      daegu_n='대구 소재병원 이용 건수' daegu_pct_of_total='대구 유출율(%, 전체대비)'
+      daegu_pct_of_out='대구 유출율(%, 유출대비) *확정 지표*'
+      top6_n='대구 6개 특정병원 이용 건수(합산)' top6_pct_of_total='대구6병원 유출율(%, 전체대비)'
+      top6_pct_of_out='대구6병원 유출율(%, 유출대비) *확정 지표*'
+      gb_hp_n='경북대학교병원 건수' gb_hp_yu_n='영남대학교병원 건수' gb_hp_ga_n='대구가톨릭대학교병원 건수'
+      gb_hp_ch_n='칠곡경북대학교병원 건수' gb_hp_gae_n='계명대학교 동산병원 건수' gb_hp_pati_n='대구파티마병원 건수'
+      gb_hp_pct_of_out='경북대 유출율(%,유출대비)' gb_hp_yu_pct_of_out='영남대 유출율(%,유출대비)'
+      gb_hp_ga_pct_of_out='가톨릭대 유출율(%,유출대비)' gb_hp_ch_pct_of_out='칠곡경북대 유출율(%,유출대비)'
+      gb_hp_gae_pct_of_out='계명대동산 유출율(%,유출대비)' gb_hp_pati_pct_of_out='대구파티마 유출율(%,유출대비)';
 run;
