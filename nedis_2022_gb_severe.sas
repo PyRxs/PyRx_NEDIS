@@ -2,7 +2,7 @@
   NEDIS 2022 : 경상북도 + 28대 중증응급 축소 버전 (0~3단계)
   - 4~5단계(주요 변수 정의)는 기존 코드를 그대로 쓰되 파일 하단의 "4~5단계 수정 사항"만 반영
   - 흐름
-      0단계  원자료 import -> 경북(환자 거주지 OR 응급의료기관 소재지)만 추출  -> save.PTM2022_GB
+      0단계  원자료 import -> 경북(환자 거주지 기준)만 추출                    -> save.PTM2022_GB
       2단계  중증외상(ICISS/SRR 2020) 산출 (경북 데이터에만 수행)              -> save.otdc_srr
       3단계  클리닝 + 28대 중증응급 정의 후 emergency_dis=1 만 추출            -> save.PTM2022_3
 **********************************************************************/
@@ -11,8 +11,9 @@ libname save '\\172.30.1.200\경북지원단\경북지원단\공공보건의료 
 
 /*--------------------------------------------------------------------
   0단계: import 후 경북만 추출
-   - 환자 거주지(PTMIGUCD) 또는 응급의료기관 소재지(PTMIEMAR)가 47xxx
-     (pa_area=15 / hp_area=15 두 최종 데이터셋과 gb_dg_go(경북민->대구병원)를 모두 커버)
+   - 환자 거주지(PTMIGUCD)가 47xxx인 건만 남김 (응급의료기관 소재지는 보지 않음
+     -> 경북 밖 병원을 이용한 경북 거주자의 대구 유출(gb_dg_go) 등, 응급의료기관
+        소재지 기준 분석이 필요해지면 이 조건에 PTMIEMAR 조건을 다시 추가할 것)
    - GUESSINGROWS=MAX : 450000행 이후에 '-' 등 문자가 나오면 숫자형으로 잘못 추정되어
      값이 결측 처리될 수 있어서 MAX 로 변경 (느리면 다시 낮추되 변수 타입 확인 필요)
 --------------------------------------------------------------------*/
@@ -25,11 +26,10 @@ RUN;
 
 data save.PTM2022_GB;
 set work.PTM2022_raw;
-length _g _e $20;
+length _g $20;
 _g=strip(vvalue(PTMIGUCD));   /* 숫자/문자형 어느 쪽으로 읽혀도 동작 */
-_e=strip(vvalue(PTMIEMAR));
-if substr(_g,1,2)='47' or substr(_e,1,2)='47';
-drop _g _e;
+if substr(_g,1,2)='47';
+drop _g;
 run;
 
 proc datasets lib=work nolist; delete PTM2022_raw; quit;
@@ -309,6 +309,11 @@ proc freq data=save.PTM2022_3; tables emergency_dis_1-emergency_dis_28 / missing
 
 /* (3) 최종 경북 데이터셋 추출: 범위 삭제 방식은 pa_area/hp_area 결측도 남김 -> where 로 변경
        data save.pa_area; set save.PTM2022_5; where pa_area=15; run;
-       data save.hp_area; set save.PTM2022_5; where hp_area=15; run;        */
+       data save.hp_area; set save.PTM2022_5; where hp_area=15; run;
+       [주의] 0단계에서 환자 거주지(PTMIGUCD) 기준으로만 경북을 추출했으므로,
+       타 시도 거주자가 경북 소재 응급의료기관을 이용한 건은 이 파일에 없음.
+       -> save.hp_area(hp_area=15)는 "경북 거주자이면서 경북 병원 이용"만 잡히는
+          부분집합이 되며, 경북 소재 응급의료기관의 전체 이용 현황과는 다름.
+          해당 분석이 필요하면 0단계 조건에 PTMIEMAR 기준을 다시 추가할 것.       */
 
 /* (4) 4단계 시작부 dataset 이름은 그대로:  data save.PTM2022_4; set save.PTM2022_3; ...  */
