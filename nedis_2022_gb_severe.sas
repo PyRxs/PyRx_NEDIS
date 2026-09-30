@@ -247,6 +247,27 @@ by PTMIIDNO;
 if a;
 run;
 
+/* [참고용] PTM2022_1(경북 거주자, 중증 여부 무관 전체 응급실 내원) 기준 단순 유출율
+   - hp_area/pa_area 코드표 없이, 응급의료기관지역(PTMIEMAR) 앞 2자리가 '47'(경북)이
+     아니면 유출로 간주하는 단순 버전. 3~6단계의 중증응급환자 전용 유출율(32.83% 등)과
+     비교해서, 그 수치가 중증환자만의 특성인지 전체 모집단의 기본 유출 성향과 얼마나
+     다른지 가늠하는 참고 지표 */
+data work.simple_outflow;
+set save.PTM2022_1 end=eof;
+retain n_total n_out 0;
+n_total+1;
+if substr(strip(vvalue(ptmiemar)),1,2) ne '47' then n_out+1;
+if eof then do;
+  pct_out=round(n_out/n_total*100,0.1);
+  output;
+end;
+keep n_total n_out pct_out;
+run;
+
+proc print data=work.simple_outflow noobs label;
+label n_total='전체 응급실 내원건수(경북 거주자)' n_out='유출 건수' pct_out='단순 유출율(%)';
+run;
+
 
 /**********************************************************
       3단계: 데이터 클리닝 및 28대 중증응급 정의
